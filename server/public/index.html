@@ -1,0 +1,1440 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>闲鱼聚合 — 智能客服</title>
+  <meta name="description" content="闲鱼聊天记录聚合 + 智能客服发送管理" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #080c12;
+      --bg2: #0d1420;
+      --bg3: #141e2e;
+      --bg4: #1a2740;
+      --border: #1c2a40;
+      --border2: #243350;
+      --accent: #f0c020;
+      --accent2: #ffd84d;
+      --accent-g: linear-gradient(135deg, #f0c020, #ffdd57);
+      --success: #34d399;
+      --fail: #f87171;
+      --pending: #fbbf24;
+      --text: #e2e8f8;
+      --text2: #b0bdd0;
+      --muted: #5c7296;
+      --me-bg: linear-gradient(135deg, #f0c020 0%, #ffd84d 100%);
+      --me-txt: #111;
+      --th-bg: #172036;
+      --sidebar: 320px;
+      --header-h: 52px;
+      --radius: 10px;
+      --shadow: 0 4px 24px rgba(0, 0, 0, .35);
+    }
+
+    html,
+    body {
+      height: 100%;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Animations ── */
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(6px);
+      }
+
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
+
+    @keyframes slideUp {
+      from {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: .55;
+      }
+    }
+
+    @keyframes shimmer {
+      0% {
+        background-position: -400px 0;
+      }
+
+      100% {
+        background-position: 400px 0;
+      }
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      height: var(--header-h);
+      background: linear-gradient(180deg, rgba(20, 30, 46, .95), rgba(13, 20, 32, .98));
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      backdrop-filter: blur(12px);
+      z-index: 10;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: var(--accent-g);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      font-weight: 700;
+      color: #111;
+    }
+
+    header h1 {
+      font-size: 15px;
+      font-weight: 700;
+      background: var(--accent-g);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      white-space: nowrap;
+      letter-spacing: -.2px;
+    }
+
+    #search {
+      flex: 1;
+      max-width: 260px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 7px 12px 7px 34px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: inherit;
+      transition: all .2s;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='15' height='15' fill='%235c7296' viewBox='0 0 24 24'%3E%3Cpath d='M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: 10px center;
+    }
+
+    #search:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(240, 192, 32, .15);
+    }
+
+    #search::placeholder {
+      color: var(--muted);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .btn {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text2);
+      padding: 6px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: inherit;
+      white-space: nowrap;
+      transition: all .15s;
+      font-weight: 500;
+    }
+
+    .btn:hover {
+      border-color: var(--accent);
+      color: var(--text);
+      background: var(--bg4);
+    }
+
+    .btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(240, 192, 32, .08);
+    }
+
+    .toggle-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 122px;
+      justify-content: center;
+      font-weight: 700;
+    }
+
+    .toggle-pill.on {
+      border-color: rgba(52, 211, 153, .35);
+      background: rgba(52, 211, 153, .1);
+      color: var(--success);
+    }
+
+    .toggle-pill.off {
+      border-color: rgba(248, 113, 113, .28);
+      background: rgba(248, 113, 113, .08);
+      color: #ffb4b4;
+    }
+
+    .toggle-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 10px currentColor;
+    }
+
+    #stats {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      padding: 4px 10px;
+      background: var(--bg3);
+      border-radius: 6px;
+    }
+
+    /* ── Layout ── */
+    .layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      width: var(--sidebar);
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      background: var(--bg2);
+    }
+
+    .si {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(28, 42, 64, .5);
+      cursor: pointer;
+      transition: all .15s;
+      position: relative;
+      animation: fadeIn .3s ease both;
+    }
+
+    .si:hover {
+      background: var(--bg3);
+    }
+
+    .si.active {
+      background: linear-gradient(90deg, rgba(240, 192, 32, .08), transparent);
+      border-left: 3px solid var(--accent);
+    }
+
+    .si .name {
+      font-weight: 600;
+      font-size: 13.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text);
+    }
+
+    .si .pid {
+      font-size: 10px;
+      background: var(--bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--muted);
+      font-weight: 500;
+      font-family: 'SF Mono', 'Menlo', monospace;
+    }
+
+    .si .preview {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100%;
+    }
+
+    .si .meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 5px;
+    }
+
+    .si .meta .price {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .badge {
+      background: var(--accent-g);
+      color: #111;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 10px;
+      min-width: 20px;
+      text-align: center;
+    }
+
+    .si .pending-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--pending);
+      display: inline-block;
+      animation: pulse 1.5s infinite;
+      margin-left: 4px;
+    }
+
+    #sidebar-msg {
+      padding: 40px 20px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.8;
+    }
+
+    /* ── Chat panel ── */
+    #chat {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #chat-header {
+      padding: 12px 18px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    #chat-header .info {
+      flex: 1;
+    }
+
+    #chat-header .cn {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -.2px;
+    }
+
+    #chat-header .cm {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .chat-mode-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .1px;
+    }
+
+    .chat-mode-badge.ai-on {
+      background: rgba(52, 211, 153, .1);
+      border: 1px solid rgba(52, 211, 153, .24);
+      color: var(--success);
+    }
+
+    .chat-mode-badge.ai-off {
+      background: rgba(248, 113, 113, .08);
+      border: 1px solid rgba(248, 113, 113, .2);
+      color: #ffb4b4;
+    }
+
+    #chat-header .pl {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 12px;
+      opacity: .8;
+      transition: opacity .15s;
+    }
+
+    #chat-header .pl:hover {
+      opacity: 1;
+      text-decoration: underline;
+    }
+
+    .product-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(240, 192, 32, .1);
+      border: 1px solid rgba(240, 192, 32, .2);
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .pending-count-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(251, 191, 36, .1);
+      border: 1px solid rgba(251, 191, 36, .2);
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--pending);
+      cursor: pointer;
+      transition: all .15s;
+    }
+
+    .pending-count-badge:hover {
+      background: rgba(251, 191, 36, .15);
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 18px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      scroll-behavior: smooth;
+    }
+
+    .mr {
+      display: flex;
+      flex-direction: column;
+      animation: slideUp .25s ease both;
+    }
+
+    .mr.me {
+      align-items: flex-end;
+    }
+
+    .mr.them {
+      align-items: flex-start;
+    }
+
+    .ml {
+      font-size: 10px;
+      color: var(--muted);
+      margin-bottom: 3px;
+      padding: 0 4px;
+      font-weight: 500;
+    }
+
+    .bub {
+      max-width: 65%;
+      padding: 9px 14px;
+      border-radius: 14px;
+      font-size: 13.5px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      position: relative;
+    }
+
+    .me .bub {
+      background: var(--me-bg);
+      color: var(--me-txt);
+      border-bottom-right-radius: 4px;
+      font-weight: 500;
+    }
+
+    .them .bub {
+      background: var(--th-bg);
+      color: var(--text);
+      border-bottom-left-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    #chat-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      gap: 12px;
+    }
+
+    .empty-icon {
+      font-size: 48px;
+      opacity: .3;
+    }
+
+    .empty-text {
+      font-size: 14px;
+    }
+
+    /* ── Outgoing Queue Panel ── */
+    #outgoing-panel {
+      border-top: 1px solid var(--border);
+      background: var(--bg2);
+      max-height: 200px;
+      overflow-y: auto;
+      flex-shrink: 0;
+      display: none;
+    }
+
+    #outgoing-panel.show {
+      display: block;
+    }
+
+    .outgoing-header {
+      padding: 8px 18px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--bg2);
+      z-index: 1;
+    }
+
+    .outgoing-header .close-btn {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 16px;
+      background: none;
+      border: none;
+      padding: 2px 6px;
+      transition: color .15s;
+    }
+
+    .outgoing-header .close-btn:hover {
+      color: var(--text);
+    }
+
+    .oq-item {
+      padding: 8px 18px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid rgba(28, 42, 64, .3);
+      animation: fadeIn .2s ease both;
+    }
+
+    .oq-status {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .oq-status.pending {
+      background: var(--pending);
+      animation: pulse 1.5s infinite;
+    }
+
+    .oq-status.sent {
+      background: var(--success);
+    }
+
+    .oq-status.failed {
+      background: var(--fail);
+    }
+
+    .oq-content {
+      flex: 1;
+      color: var(--text2);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .oq-source {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 999px;
+      flex-shrink: 0;
+      letter-spacing: .2px;
+    }
+
+    .oq-source.ai {
+      color: var(--accent);
+      background: rgba(240, 192, 32, .12);
+      border: 1px solid rgba(240, 192, 32, .22);
+    }
+
+    .oq-source.manual {
+      color: #8dd8ff;
+      background: rgba(56, 189, 248, .12);
+      border: 1px solid rgba(56, 189, 248, .2);
+    }
+
+    .oq-time {
+      color: var(--muted);
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+
+    .oq-label {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      text-transform: uppercase;
+    }
+
+    .oq-label.pending {
+      background: rgba(251, 191, 36, .15);
+      color: var(--pending);
+    }
+
+    .oq-label.sent {
+      background: rgba(52, 211, 153, .12);
+      color: var(--success);
+    }
+
+    .oq-label.failed {
+      background: rgba(248, 113, 113, .12);
+      color: var(--fail);
+    }
+
+    /* ── Outbox input ── */
+    #outbox-bar {
+      display: flex;
+      gap: 8px;
+      padding: 12px 18px;
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      align-items: center;
+    }
+
+    .outbox-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 120px;
+      flex-shrink: 0;
+    }
+
+    .outbox-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .outbox-subtitle {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    #outbox-bar.hidden {
+      display: none;
+    }
+
+    #ob-input {
+      flex: 1;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 9px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: inherit;
+      transition: all .2s;
+      resize: none;
+      min-height: 38px;
+      max-height: 100px;
+    }
+
+    #ob-input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(240, 192, 32, .1);
+    }
+
+    #ob-input::placeholder {
+      color: var(--muted);
+    }
+
+    #ob-send {
+      background: var(--accent-g);
+      color: #111;
+      border: none;
+      padding: 9px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 13px;
+      font-family: inherit;
+      transition: all .15s;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    #ob-send:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(240, 192, 32, .25);
+    }
+
+    #ob-send:active {
+      transform: none;
+    }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%) translateY(10px);
+      background: rgba(20, 30, 46, .95);
+      border: 1px solid var(--border2);
+      color: var(--text);
+      padding: 10px 20px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      opacity: 0;
+      transition: all .3s;
+      pointer-events: none;
+      backdrop-filter: blur(12px);
+      box-shadow: var(--shadow);
+      font-weight: 500;
+    }
+
+    #toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    #toast.success {
+      border-color: var(--success);
+    }
+
+    #toast.error {
+      border-color: var(--fail);
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--border2);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      :root {
+        --sidebar: 240px;
+      }
+
+      #search {
+        max-width: 160px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">鱼</div>
+      <h1>闲鱼聚合</h1>
+    </div>
+    <input id="search" type="text" placeholder="搜索买家 / 内容..." />
+
+    <div class="header-actions">
+      <button class="btn toggle-pill" id="ai-toggle" title="切换 AI 自动回复">
+        <span class="toggle-indicator"></span>
+        <span id="ai-toggle-label">AI 回复</span>
+      </button>
+      <button class="btn" id="queue-btn" title="查看待发队列">📤 待发队列</button>
+      <button class="btn" id="refresh-btn">↻ 刷新</button>
+      <span id="stats">—</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <div id="sidebar">
+      <div id="sidebar-msg">加载中…</div>
+    </div>
+    <div id="chat">
+      <div id="chat-empty">
+        <div class="empty-icon">💬</div>
+        <div class="empty-text">从左侧选择一个会话</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    const sidebar = document.getElementById('sidebar');
+    const chatEl = document.getElementById('chat');
+    const searchEl = document.getElementById('search');
+    const statsEl = document.getElementById('stats');
+    const refreshBtn = document.getElementById('refresh-btn');
+    const queueBtn = document.getElementById('queue-btn');
+    const aiToggleBtn = document.getElementById('ai-toggle');
+    const aiToggleLabel = document.getElementById('ai-toggle-label');
+
+    let sessions = [];
+    let activeKey = null;
+    let outgoingCache = {};
+    let appSettings = { autoReplyEnabled: true };
+    let chatCache = {};
+    let isPollingDashboard = false;
+
+    // ── Fetch helpers ──────────────────────────────────────────────────────────
+
+    const j = (url, opts) =>
+      fetch(url, opts).then(r => r.json());
+
+    /**
+     * 刷新当前 AI 自动回复状态，并同步顶栏按钮样式。
+     * @param {boolean} silent - 是否静默失败，避免轮询时频繁提示。
+     */
+    async function loadSettings(silent = false) {
+      try {
+        appSettings = await j('/api/settings');
+        renderAiToggle();
+      } catch (e) {
+        if (!silent) toast('❌ ' + e.message, 'error');
+      }
+    }
+
+    /**
+     * 根据当前设置渲染 AI 开关状态。
+     */
+    function renderAiToggle() {
+      const enabled = !!appSettings.autoReplyEnabled;
+      aiToggleBtn.classList.toggle('on', enabled);
+      aiToggleBtn.classList.toggle('off', !enabled);
+      aiToggleLabel.textContent = enabled ? 'AI 回复开启' : 'AI 回复关闭';
+      aiToggleBtn.title = enabled ? '点击关闭 AI 自动回复，转为人工介入' : '点击开启 AI 自动回复';
+    }
+
+    /**
+     * 切换 AI 自动回复状态，并持久化到后端设置表。
+     */
+    async function toggleAutoReply() {
+      const nextValue = !appSettings.autoReplyEnabled;
+      aiToggleBtn.disabled = true;
+      try {
+        const result = await j('/api/settings', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ autoReplyEnabled: nextValue }),
+        });
+        appSettings.autoReplyEnabled = !!result.autoReplyEnabled;
+        renderAiToggle();
+        if (activeKey) {
+          loadChat(activeKey);
+        }
+        toast(appSettings.autoReplyEnabled ? '🤖 AI 自动回复已开启' : '✍️ AI 自动回复已关闭，当前由人工接管');
+      } catch (e) {
+        toast('❌ ' + e.message, 'error');
+      }
+      aiToggleBtn.disabled = false;
+    }
+
+    async function loadSessions() {
+      try {
+        sessions = await j('/api/sessions');
+        statsEl.textContent = sessions.length + ' 个会话';
+        renderSidebar(filterSessions(searchEl.value));
+      } catch (e) {
+        sidebar.innerHTML = `<div id="sidebar-msg">⚠️ 加载失败<br><span style="font-size:11px;opacity:.7">${e.message}</span></div>`;
+      }
+    }
+
+    /**
+     * 为右侧聊天面板构建稳定签名，避免相同数据重复整块重绘。
+     * @param {any} session - 当前会话元数据。
+     * @param {any[]} messages - 当前消息列表。
+     * @param {any[]} outgoing - 当前待发消息列表。
+     * @returns {string} 可比较的签名串。
+     */
+    function buildChatSignature(session, messages, outgoing) {
+      return JSON.stringify({
+        chatKey: session?.chat_key || '',
+        productJson: session?.product_json || '',
+        updatedAt: session?.updated_at || 0,
+        autoReplyEnabled: !!appSettings.autoReplyEnabled,
+        messages: (messages || []).map(m => [m.seq ?? 0, m.content || '', !!m.is_me]),
+        outgoing: (outgoing || []).map(o => [o.id, o.status, o.content || '', o.source || 'ai', o.sent_at || 0, o.created_at || 0])
+      });
+    }
+
+    /**
+     * 读取指定会话的最新详情，并落到本地缓存。
+     * @param {string} chatKey - 会话键。
+     * @returns {Promise<{session: any, messages: any[], outgoing: any[], signature: string}>} 最新聊天快照。
+     */
+    async function fetchChatSnapshot(chatKey) {
+      const { session, messages } = await j(`/api/sessions/${encodeURIComponent(chatKey)}/messages`);
+      const outgoing = await j(`/api/outgoing-messages?chatKey=${encodeURIComponent(chatKey)}`);
+      outgoingCache[chatKey] = outgoing;
+      const signature = buildChatSignature(session, messages, outgoing);
+      const snapshot = { session, messages, outgoing, signature };
+      chatCache[chatKey] = snapshot;
+      return snapshot;
+    }
+
+    /**
+     * 加载右侧聊天面板；优先显示缓存，再后台刷新，避免每次选择会话都出现整块闪烁。
+     * @param {string} chatKey - 会话键。
+     * @param {{ forceRefresh?: boolean }} options - 加载选项。
+     */
+    async function loadChat(chatKey, { forceRefresh = false } = {}) {
+      const previousActiveKey = activeKey;
+      const preservedUiState = previousActiveKey === chatKey ? captureChatUiState() : null;
+      activeKey = chatKey;
+      renderActive();
+      const cached = chatCache[chatKey];
+      if (cached && !forceRefresh) {
+        renderChat(cached.session, cached.messages, cached.outgoing, {
+          animateMessages: false,
+          uiState: preservedUiState
+        });
+      } else if (!cached) {
+        chatEl.innerHTML = '<div id="chat-empty"><div class="empty-icon" style="animation:pulse 1s infinite">⏳</div><div class="empty-text">加载中…</div></div>';
+      }
+      try {
+        const snapshot = await fetchChatSnapshot(chatKey);
+        if (activeKey !== chatKey) return;
+        const shouldRender = !cached || cached.signature !== snapshot.signature || forceRefresh || previousActiveKey !== chatKey;
+        if (shouldRender) {
+          renderChat(snapshot.session, snapshot.messages, snapshot.outgoing, {
+            animateMessages: false,
+            uiState: preservedUiState
+          });
+        }
+      } catch (e) {
+        if (!cached) {
+          chatEl.innerHTML = `<div id="chat-empty"><div class="empty-icon">⚠️</div><div class="empty-text">${e.message}</div></div>`;
+        } else {
+          toast('❌ ' + e.message, 'error');
+        }
+      }
+    }
+
+    // ── Sidebar ────────────────────────────────────────────────────────────────
+
+    function filterSessions(q) {
+      if (!q) return sessions;
+      const lq = q.toLowerCase();
+      return sessions.filter(s =>
+        s.customer_name.toLowerCase().includes(lq) ||
+        (s.chat_key || '').toLowerCase().includes(lq) ||
+        (s.last_message || '').toLowerCase().includes(lq) ||
+        (s.product_id || '').includes(lq)
+      );
+    }
+
+    /**
+     * 为左侧会话项构建稳定的渲染模型，便于做增量更新而不是整列重绘。
+     * @param {any} session - 当前会话对象。
+     * @returns {{ key: string, signature: string, html: string }} 渲染模型。
+     */
+    function buildSidebarItemModel(session) {
+      const p = tryParse(session.product_json);
+      const preview = session.last_message ? ((session.last_is_me ? '我: ' : '') + session.last_message) : '暂无消息';
+      const pidBadge = session.product_id ? `<span class="pid">#${session.product_id.slice(-4)}</span>` : '';
+      const oc = outgoingCache[session.chat_key] || [];
+      const pendingCount = oc.filter(o => o.status === 'pending').length;
+      const pendingDot = pendingCount > 0 ? '<span class="pending-dot" title="有待发消息"></span>' : '';
+      const timeStr = timeAgo(session.last_time || session.updated_at);
+      const html = `
+        <div class="name">
+          <span>${esc(session.customer_name)}</span>${pidBadge}${pendingDot}
+          <span style="margin-left:auto; font-size:10px; color:var(--muted); font-weight:normal; letter-spacing:0">${timeStr}</span>
+        </div>
+        <div class="preview">${esc(preview)}</div>
+        <div class="meta">
+          <span class="price">${esc(p.price || '')}</span>
+          <span>${esc(p.location || '')}</span>
+          <span class="badge">${session.message_count}</span>
+        </div>
+      `;
+      const signature = [
+        session.customer_name,
+        session.product_id || '',
+        preview,
+        pendingCount,
+        p.price || '',
+        p.location || '',
+        session.message_count,
+        timeStr
+      ].join('||');
+
+      return {
+        key: session.chat_key,
+        signature,
+        html
+      };
+    }
+
+    /**
+     * 创建单个左侧会话节点，并绑定点击事件。
+     * @param {{ key: string, signature: string, html: string }} model - 会话渲染模型。
+     * @param {number} index - 当前列表序号，仅用于首次进入动画延迟。
+     * @returns {HTMLDivElement} 可复用的会话节点。
+     */
+    function createSidebarItem(model, index) {
+      const el = document.createElement('div');
+      el.className = 'si';
+      el.dataset.key = model.key;
+      el.style.animationDelay = `${index * 30}ms`;
+      el.addEventListener('click', () => loadChat(el.dataset.key));
+      updateSidebarItem(el, model);
+      return el;
+    }
+
+    /**
+     * 只在内容真正变化时更新单个左侧会话节点，避免轮询时整列闪烁。
+     * @param {HTMLDivElement} el - 已存在的会话节点。
+     * @param {{ key: string, signature: string, html: string }} model - 会话渲染模型。
+     */
+    function updateSidebarItem(el, model) {
+      el.dataset.key = model.key;
+      if (el.dataset.signature !== model.signature) {
+        el.innerHTML = model.html;
+        el.dataset.signature = model.signature;
+      }
+      el.classList.toggle('active', activeKey === model.key);
+    }
+
+    function renderSidebar(list) {
+      if (!list.length) {
+        if (!sidebar.querySelector('#sidebar-msg') || sidebar.textContent.trim() !== '🔍 无匹配结果') {
+          sidebar.innerHTML = '<div id="sidebar-msg">🔍 无匹配结果</div>';
+        }
+        return;
+      }
+      const existingItems = new Map(
+        Array.from(sidebar.querySelectorAll('.si')).map(el => [el.dataset.key, el])
+      );
+      const usedKeys = new Set();
+
+      list.forEach((session, index) => {
+        const model = buildSidebarItemModel(session);
+        let el = existingItems.get(model.key);
+        if (!el) {
+          el = createSidebarItem(model, index);
+        } else {
+          updateSidebarItem(el, model);
+        }
+
+        const currentChild = sidebar.children[index];
+        if (currentChild !== el) {
+          sidebar.insertBefore(el, currentChild || null);
+        }
+        usedKeys.add(model.key);
+      });
+
+      Array.from(sidebar.querySelectorAll('.si')).forEach(el => {
+        if (!usedKeys.has(el.dataset.key)) {
+          el.remove();
+        }
+      });
+
+      const emptyNode = sidebar.querySelector('#sidebar-msg');
+      if (emptyNode) {
+        emptyNode.remove();
+      }
+    }
+
+    function renderActive() {
+      sidebar.querySelectorAll('.si').forEach(el =>
+        el.classList.toggle('active', el.dataset.key === activeKey)
+      );
+    }
+
+    // ── Chat ───────────────────────────────────────────────────────────────────
+
+    /**
+     * 捕获右侧聊天面板的交互状态，便于自动刷新时保留阅读位置和人工输入草稿。
+     * @returns {{
+     *   stickToBottom: boolean,
+     *   offsetFromBottom: number,
+     *   draft: string,
+     *   draftSelectionStart: number | null,
+     *   draftSelectionEnd: number | null,
+     *   wasInputFocused: boolean,
+     *   queueOpen: boolean
+     * }} 当前聊天 UI 状态。
+     */
+    function captureChatUiState() {
+      const messagesEl = document.getElementById('messages');
+      const inputEl = document.getElementById('ob-input');
+      const queuePanelEl = document.getElementById('outgoing-panel');
+      const activeElement = document.activeElement;
+      const distanceFromBottom = messagesEl
+        ? Math.max(messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight, 0)
+        : 0;
+      const wasInputFocused = !!inputEl && inputEl === activeElement;
+
+      return {
+        stickToBottom: !messagesEl || distanceFromBottom <= 24,
+        offsetFromBottom: distanceFromBottom,
+        draft: inputEl ? inputEl.value : '',
+        draftSelectionStart: wasInputFocused ? inputEl.selectionStart : null,
+        draftSelectionEnd: wasInputFocused ? inputEl.selectionEnd : null,
+        wasInputFocused,
+        queueOpen: !!queuePanelEl && queuePanelEl.classList.contains('show')
+      };
+    }
+
+    /**
+     * 在聊天面板重绘后恢复滚动位置、草稿输入和待发面板展开状态。
+     * @param {{
+     *   stickToBottom: boolean,
+     *   offsetFromBottom: number,
+     *   draft: string,
+     *   draftSelectionStart: number | null,
+     *   draftSelectionEnd: number | null,
+     *   wasInputFocused: boolean,
+     *   queueOpen: boolean
+     * } | null} uiState - 先前捕获的聊天 UI 状态。
+     */
+    function restoreChatUiState(uiState) {
+      const messagesEl = document.getElementById('messages');
+      if (messagesEl) {
+        if (!uiState || uiState.stickToBottom) {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        } else {
+          messagesEl.scrollTop = Math.max(
+            messagesEl.scrollHeight - messagesEl.clientHeight - uiState.offsetFromBottom,
+            0
+          );
+        }
+      }
+
+      const queuePanelEl = document.getElementById('outgoing-panel');
+      if (queuePanelEl && uiState?.queueOpen) {
+        queuePanelEl.classList.add('show');
+      }
+
+      const inputEl = document.getElementById('ob-input');
+      if (inputEl && uiState) {
+        inputEl.value = uiState.draft;
+        if (uiState.wasInputFocused) {
+          inputEl.focus();
+          if (typeof uiState.draftSelectionStart === 'number' && typeof uiState.draftSelectionEnd === 'number') {
+            inputEl.setSelectionRange(uiState.draftSelectionStart, uiState.draftSelectionEnd);
+          }
+        }
+      }
+    }
+
+    /**
+     * 后台刷新当前已选会话；只有聊天内容或待发队列变化时才重绘右侧面板。
+     */
+    async function refreshActiveChat() {
+      if (!activeKey) return;
+
+      const chatKey = activeKey;
+      const previousSnapshot = chatCache[chatKey];
+      const previousSignature = previousSnapshot?.signature || '';
+      const preservedUiState = captureChatUiState();
+
+      try {
+        const snapshot = await fetchChatSnapshot(chatKey);
+        if (activeKey !== chatKey) return;
+        if (!previousSnapshot || previousSignature !== snapshot.signature) {
+          renderChat(snapshot.session, snapshot.messages, snapshot.outgoing, {
+            animateMessages: false,
+            uiState: preservedUiState
+          });
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    /**
+     * 轮询刷新仪表盘数据，并同步当前已选会话的右侧聊天区。
+     */
+    async function pollDashboard() {
+      if (isPollingDashboard) return;
+      isPollingDashboard = true;
+      try {
+        await loadSettings(true);
+        await loadSessions();
+        await refreshActiveChat();
+      } finally {
+        isPollingDashboard = false;
+      }
+    }
+
+    /**
+     * 渲染右侧聊天面板。
+     * @param {any} session - 会话元数据。
+     * @param {any[]} messages - 消息列表。
+     * @param {any[]} outgoing - 待发消息列表。
+     * @param {{ animateMessages?: boolean, uiState?: ReturnType<typeof captureChatUiState> | null }} options - 渲染选项。
+     */
+    function renderChat(session, messages, outgoing, { animateMessages = false, uiState = null } = {}) {
+      const p = tryParse(session.product_json);
+      const meta = [p.price, p.location].filter(Boolean);
+      const link = p.url
+        ? `<a class="pl" href="${esc(p.url)}" target="_blank" title="${esc(p.url)}">🔗 商品链接</a>`
+        : '';
+      const priceTag = p.price ? `<span class="product-tag">💰 ${esc(p.price)}</span>` : '';
+      const locTag = p.location ? `<span class="product-tag">📍 ${esc(p.location)}</span>` : '';
+      const modeBadge = appSettings.autoReplyEnabled
+        ? '<span class="chat-mode-badge ai-on">AI 自动回复中</span>'
+        : '<span class="chat-mode-badge ai-off">人工接管中</span>';
+      const pendingList = (outgoing || []).filter(o => o.status === 'pending');
+      const pendingBadge = pendingList.length > 0
+        ? `<span class="pending-count-badge" id="toggle-queue">⏳ ${pendingList.length} 条待发</span>` : '';
+
+      const header = `<div id="chat-header">
+      <div class="info">
+        <div class="cn">${esc(session.customer_name)}</div>
+        <div class="cm">${priceTag}${locTag}${link}${modeBadge}${pendingBadge}</div>
+      </div>
+    </div>`;
+
+      const bubbles = messages.length
+        ? messages.map((m, i) => {
+          const side = m.is_me ? 'me' : 'them';
+          const label = m.is_me ? '我' : esc(session.customer_name);
+          const motionStyle = animateMessages ? `animation-delay:${i * 20}ms` : 'animation:none';
+          return `<div class="mr ${side}" style="${motionStyle}">
+            <div class="ml">${label}</div>
+            <div class="bub">${esc(m.content)}</div>
+          </div>`;
+        }).join('')
+        : '<div style="text-align:center;color:var(--muted);margin-top:40px;font-size:13px">暂无消息</div>';
+
+      // Outgoing queue panel
+      const allOutgoing = outgoing || [];
+      const oqItems = allOutgoing.map(o => {
+        const statusClass = o.status;
+        const time = o.sent_at ? timeAgo(o.sent_at) : timeAgo(o.created_at);
+        const sourceClass = o.source === 'manual' ? 'manual' : 'ai';
+        const sourceLabel = o.source === 'manual' ? '人工' : 'AI';
+        return `<div class="oq-item">
+        <div class="oq-status ${statusClass}"></div>
+        <span class="oq-source ${sourceClass}">${sourceLabel}</span>
+        <div class="oq-content">${esc(o.content)}</div>
+        <span class="oq-label ${statusClass}">${o.status === 'pending' ? '待发' : o.status === 'sent' ? '已发' : '失败'}</span>
+        <div class="oq-time">${time}</div>
+      </div>`;
+      }).join('');
+
+      const oqPanel = allOutgoing.length > 0 ? `<div id="outgoing-panel">
+      <div class="outgoing-header">
+        <span>📤 发送队列 (${allOutgoing.length})</span>
+        <button class="close-btn" id="close-oq">✕</button>
+      </div>
+      ${oqItems}
+    </div>` : '';
+
+      const obBar = `<div id="outbox-bar">
+      <div class="outbox-meta">
+        <div class="outbox-title">人工回复</div>
+        <div class="outbox-subtitle">消息会先进入 pending 队列，再由浏览器自动发送</div>
+      </div>
+      <input id="ob-input" type="text" placeholder="输入人工回复内容，提交后进入 pending 队列…" />
+      <button id="ob-send">发送 ↗</button>
+    </div>`;
+
+      chatEl.innerHTML = header + `<div id="messages">${bubbles}</div>` + oqPanel + obBar;
+
+      restoreChatUiState(uiState);
+
+      // Toggle outgoing panel
+      const toggleBtn = document.getElementById('toggle-queue');
+      const oqPanelEl = document.getElementById('outgoing-panel');
+      if (toggleBtn && oqPanelEl) {
+        toggleBtn.addEventListener('click', () => oqPanelEl.classList.toggle('show'));
+      }
+      const closeOq = document.getElementById('close-oq');
+      if (closeOq && oqPanelEl) {
+        closeOq.addEventListener('click', () => oqPanelEl.classList.remove('show'));
+      }
+
+      // Send button
+      document.getElementById('ob-send').addEventListener('click', async () => {
+        const input = document.getElementById('ob-input');
+        const content = input.value.trim();
+        if (!content) return;
+        const btn = document.getElementById('ob-send');
+        btn.disabled = true; btn.textContent = '发送中…';
+        try {
+          const r = await j('/api/outgoing-messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chatKey: activeKey, content, source: 'manual' }),
+          });
+          if (r.ok) {
+            input.value = '';
+            toast(`✅ 人工回复已入队 #${r.id}`, 'success');
+            loadChat(activeKey, { forceRefresh: true }); // reload to show in queue
+          } else {
+            toast('❌ ' + (r.error || '入队失败'), 'error');
+          }
+        } catch (e) {
+          toast('❌ ' + e.message, 'error');
+        }
+        btn.disabled = false; btn.textContent = '发送 ↗';
+      });
+
+      document.getElementById('ob-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          document.getElementById('ob-send').click();
+        }
+      });
+    }
+
+    // ── Global Queue Modal ────────────────────────────────────────────────────
+
+    queueBtn.addEventListener('click', async () => {
+      queueBtn.classList.toggle('active');
+      try {
+        const all = await j('/api/outgoing-messages');
+        if (!all.length) {
+          toast('📭 队列为空');
+          queueBtn.classList.remove('active');
+          return;
+        }
+        const pending = all.filter(o => o.status === 'pending').length;
+        const sent = all.filter(o => o.status === 'sent').length;
+        const failed = all.filter(o => o.status === 'failed').length;
+        toast(`📤 ${all.length} 条: ${pending} 待发 · ${sent} 已发 · ${failed} 失败`);
+      } catch (e) {
+        toast('❌ ' + e.message, 'error');
+      }
+      setTimeout(() => queueBtn.classList.remove('active'), 300);
+    });
+
+    // ── Toast ──────────────────────────────────────────────────────────────────
+
+    let toastTimer = null;
+    function toast(msg, type = '') {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'show' + (type ? ' ' + type : '');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.className = ''; }, 3000);
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    function esc(t) {
+      return String(t || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function tryParse(s) { try { return JSON.parse(s); } catch { return {}; } }
+    function timeAgo(ts) {
+      if (!ts) return '';
+      const diff = Math.floor(Date.now() / 1000) - ts;
+      if (diff < 60) return '刚刚';
+      if (diff < 3600) return Math.floor(diff / 60) + '分钟前';
+      if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
+      return Math.floor(diff / 86400) + '天前';
+    }
+
+    // ── Init ───────────────────────────────────────────────────────────────────
+
+    searchEl.addEventListener('input', () => renderSidebar(filterSessions(searchEl.value)));
+    aiToggleBtn.addEventListener('click', toggleAutoReply);
+    refreshBtn.addEventListener('click', () => {
+      loadSettings();
+      loadSessions();
+      if (activeKey) loadChat(activeKey, { forceRefresh: true });
+      toast('↻ 已刷新');
+    });
+
+    loadSettings();
+    loadSessions();
+    setInterval(pollDashboard, 3000);
+  </script>
+</body>
+
+</html>

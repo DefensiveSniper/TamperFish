@@ -1,0 +1,13 @@
+.DS_Store
+.chrome-xianyu-profile/
+.chrome-proxy-extension/
+.claude/
+agent_logs/
+node_modules/
+11.md
+server/.chrome-proxy.local.json
+server/.chrome-proxy-extension/
+server/ai.local.js
+server/data.db*
+server/*.log
+server/*.pid
