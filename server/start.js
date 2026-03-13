@@ -19,6 +19,41 @@ const DEFAULT_CHROME_PROXY_CONFIG_PATH = path.join(__dirname, '.chrome-proxy.loc
 const DEFAULT_CHROME_PROXY_SCHEME = 'http';
 const DEFAULT_CHROME_PROXY_BYPASS_LIST = 'localhost;127.0.0.1;::1';
 const DEFAULT_CHROME_PROXY_EXTENSION_DIR = path.join(__dirname, '.chrome-proxy-extension');
+const DEFAULT_CHROME_CLEAR_TRANSIENT_DATA_ON_START = true;
+const DEFAULT_CHROME_START_TIMEOUT_MS = 15000;
+const DEFAULT_CHROME_REPAIR_TAMPERMONKEY_WEBREQUEST_ON_START = true;
+const DEFAULT_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD = 4096;
+const CHROME_SINGLETON_ARTIFACTS = [
+  'SingletonLock',
+  'SingletonCookie',
+  'SingletonSocket',
+  'DevToolsActivePort',
+];
+const CHROME_ROOT_TRANSIENT_ENTRIES = [
+  'GraphiteDawnCache',
+  'ShaderCache',
+  'GrShaderCache',
+  'component_crx_cache',
+];
+const CHROME_PROFILE_TRANSIENT_ENTRIES = [
+  'Cache',
+  'Code Cache',
+  'GPUCache',
+  'DawnGraphiteCache',
+  'DawnWebGPUCache',
+  'blob_storage',
+  'Sessions',
+  'Session Storage',
+  'Service Worker',
+  'Platform Notifications',
+  'Network Persistent State',
+];
+const TAMPERMONKEY_CANONICAL_WEBREQUEST_EVENTS = [
+  'webRequest.onBeforeRequest/s1',
+  'webRequest.onHeadersReceived/s2',
+  'webRequest.onResponseStarted/s3',
+  'webRequest.onErrorOccurred/s4',
+];
 
 const children = [];
 let shuttingDown = false;
@@ -39,15 +74,30 @@ function parseArgs(argv) {
 }
 
 /**
+ * 向日志流安全写入内容；流已结束或销毁时静默跳过，避免退出阶段抛出 write-after-end。
+ * @param {NodeJS.WritableStream | null | undefined} stream - 目标日志流。
+ * @param {string | Buffer} chunk - 要写入的内容。
+ */
+function writeToStreamSafely(stream, chunk) {
+  if (!stream || stream.destroyed || stream.writableEnded === true || stream.writable === false) {
+    return;
+  }
+
+  try {
+    stream.write(chunk);
+  } catch (_) {
+    // 退出阶段允许日志丢失，避免因为收尾输出把整个启动器打崩。
+  }
+}
+
+/**
  * 统一输出启动日志，便于区分 bootstrap 与业务进程。
  * @param {string} message - 要输出的日志内容。
  */
 function log(message) {
   const line = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] [bootstrap] ${message}\n`;
   process.stdout.write(line);
-  if (runtimeLogStream) {
-    runtimeLogStream.write(line);
-  }
+  writeToStreamSafely(runtimeLogStream, line);
 }
 
 /**
@@ -87,7 +137,7 @@ function attachChildOutput(child, targets) {
     child.stdout.on('data', (chunk) => {
       process.stdout.write(chunk);
       for (const stream of targets) {
-        stream.write(chunk);
+        writeToStreamSafely(stream, chunk);
       }
     });
   }
@@ -96,7 +146,7 @@ function attachChildOutput(child, targets) {
     child.stderr.on('data', (chunk) => {
       process.stderr.write(chunk);
       for (const stream of targets) {
-        stream.write(chunk);
+        writeToStreamSafely(stream, chunk);
       }
     });
   }
@@ -208,10 +258,10 @@ const proxyConfig = ${JSON.stringify({
   }, null, 2)};
 
 function shouldHandleProxyAuth(details) {
-  return !!details.isProxy
-    && details.challenger
-    && details.challenger.host === proxyConfig.host
-    && Number(details.challenger.port) === Number(proxyConfig.port);
+  // 代理服务可能经过转发、解析为 IP，或返回与配置项不同的 challenger 标识。
+  // 只要当前请求明确是代理鉴权，就直接回填项目配置中的账号密码，避免因为 host/port
+  // 精确匹配失败而落回浏览器原生弹窗。
+  return !!details.isProxy;
 }
 
 chrome.webRequest.onAuthRequired.addListener(
@@ -243,17 +293,17 @@ chrome.webRequest.onAuthRequired.addListener(
  * 根据配置组装 Chrome 代理相关启动参数。
  * @param {{
  *   chromeProxyServer: string,
- *   chromeProxyScheme: string,
- *   chromeProxyBypassList: string,
+  *   chromeProxyScheme: string,
+  *   chromeProxyBypassList: string,
  *   chromeProxyUsername: string,
  *   chromeProxyPassword: string,
  *   chromeProxyExtensionDir: string
  * }} config - 代理配置。
- * @returns {{args: string[], logMessage: string | null}} 代理参数与脱敏日志。
+ * @returns {{args: string[], extensionDirs: string[], logMessage: string | null}} 代理参数与脱敏日志。
  */
 function buildChromeProxyArgs(config) {
   if (!hasChromeProxy(config)) {
-    return { args: [], logMessage: null };
+    return { args: [], extensionDirs: [], logMessage: null };
   }
 
   const normalizedProxy = normalizeChromeProxyServer(
@@ -261,21 +311,23 @@ function buildChromeProxyArgs(config) {
     config.chromeProxyScheme
   );
   if (!normalizedProxy) {
-    return { args: [], logMessage: null };
+    return { args: [], extensionDirs: [], logMessage: null };
   }
 
   const args = [`--proxy-server=${normalizedProxy.serverArg}`];
+  const extensionDirs = [];
   if (config.chromeProxyBypassList) {
     args.push(`--proxy-bypass-list=${config.chromeProxyBypassList}`);
   }
 
   const proxyExtensionDir = ensureChromeProxyExtension(config);
   if (proxyExtensionDir) {
-    args.push(`--load-extension=${proxyExtensionDir}`);
+    extensionDirs.push(proxyExtensionDir);
   }
 
   return {
     args,
+    extensionDirs,
     logMessage: `启用 Chrome 代理 ${normalizedProxy.serverArg}${proxyExtensionDir ? '（含认证扩展）' : ''}`,
   };
 }
@@ -314,6 +366,388 @@ function ensureChromeUserDataDir(userDataRoot) {
 }
 
 /**
+ * 删除单个文件或目录；不存在时静默跳过。
+ * @param {string} targetPath - 待删除的路径。
+ * @returns {boolean} 本次是否实际删除了目标。
+ */
+function removePathIfExists(targetPath) {
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    return false;
+  }
+
+  fs.rmSync(targetPath, {
+    recursive: true,
+    force: true,
+    maxRetries: 2,
+    retryDelay: 50,
+  });
+  return true;
+}
+
+/**
+ * 清理 Chrome 用户数据目录中的残留单例锁文件，避免上次异常退出后阻塞新实例启动。
+ * @param {string} userDataRoot - Chrome 用户数据根目录。
+ * @returns {string[]} 本次实际删除的相对路径列表。
+ */
+function clearChromeSingletonArtifacts(userDataRoot) {
+  const removed = [];
+  for (const entry of CHROME_SINGLETON_ARTIFACTS) {
+    const targetPath = path.join(userDataRoot, entry);
+    if (removePathIfExists(targetPath)) {
+      removed.push(entry);
+    }
+  }
+  return removed;
+}
+
+/**
+ * 清理项目专用 Chrome profile 的瞬态缓存，保留登录态、扩展和站点数据不动。
+ * 这类缓存膨胀或损坏时，容易造成浏览器启动卡死或网络服务异常重启。
+ * @param {{chromeUserDataDir: string, chromeClearTransientDataOnStart: boolean}} config - Chrome 启动配置。
+ * @param {{profileDirectory: string}} profile - 当前要使用的 profile 信息。
+ */
+function clearChromeTransientData(config, profile) {
+  const removed = clearChromeSingletonArtifacts(config.chromeUserDataDir);
+  if (!config.chromeClearTransientDataOnStart) {
+    if (removed.length > 0) {
+      log(`启动前清理 Chrome 残留锁文件: ${removed.join(', ')}`);
+    }
+    return;
+  }
+
+  for (const entry of CHROME_ROOT_TRANSIENT_ENTRIES) {
+    const targetPath = path.join(config.chromeUserDataDir, entry);
+    if (removePathIfExists(targetPath)) {
+      removed.push(entry);
+    }
+  }
+
+  const profileRoot = path.join(config.chromeUserDataDir, profile.profileDirectory);
+  for (const entry of CHROME_PROFILE_TRANSIENT_ENTRIES) {
+    const targetPath = path.join(profileRoot, entry);
+    if (removePathIfExists(targetPath)) {
+      removed.push(path.join(profile.profileDirectory, entry));
+    }
+  }
+
+  if (removed.length > 0) {
+    log(`启动前清理 Chrome 瞬态数据: ${removed.join(', ')}`);
+  }
+}
+
+/**
+ * 判断扩展配置是否指向 Tampermonkey，兼容中英文名称。
+ * @param {Record<string, any>} extensionSetting - 单个扩展的 Secure Preferences 配置。
+ * @returns {boolean} 是否命中 Tampermonkey。
+ */
+function isTampermonkeyExtensionSetting(extensionSetting = {}) {
+  const manifest = extensionSetting.manifest || {};
+  const nameText = [
+    manifest.name,
+    manifest.short_name,
+    manifest.description,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  if (/tampermonkey|篡改猴/u.test(nameText)) {
+    return true;
+  }
+
+  const permissions = Array.isArray(manifest.permissions) ? manifest.permissions : [];
+  const serviceWorkerEvents = Array.isArray(extensionSetting.serviceworkerevents)
+    ? extensionSetting.serviceworkerevents
+    : [];
+
+  return permissions.includes('webRequestBlocking')
+    && permissions.includes('userScripts')
+    && serviceWorkerEvents.includes('webRequest.onBeforeRequest/s1')
+    && serviceWorkerEvents.includes('webRequest.onResponseStarted/s3');
+}
+
+/**
+ * 去掉 service worker 事件键尾部的 `/s123` 形式实例编号，得到稳定基名。
+ * @param {string} eventKey - 原始事件键。
+ * @returns {string} 事件基名。
+ */
+function getServiceWorkerEventBaseKey(eventKey) {
+  return String(eventKey || '').replace(/\/s\d+$/, '');
+}
+
+/**
+ * 从一组重复的 webRequest 子事件里选出要保留到规范键上的过滤条件。
+ * 优先保留规范键本身，其次保留非空过滤条件，最后退回最短键名。
+ * @param {{key: string, value: any}[]} entries - 同一基名下的候选事件项。
+ * @param {string} preferredKey - 期望保留的规范键名。
+ * @returns {any} 应写回规范键的过滤条件。
+ */
+function selectCanonicalFilteredEventValue(entries, preferredKey) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return [];
+  }
+
+  const exactMatch = entries.find((entry) => entry.key === preferredKey);
+  if (exactMatch) {
+    return exactMatch.value;
+  }
+
+  const populatedEntry = entries.find(
+    (entry) => Array.isArray(entry.value) && entry.value.length > 0
+  );
+  if (populatedEntry) {
+    return populatedEntry.value;
+  }
+
+  const shortestKeyEntry = [...entries].sort((left, right) => {
+    return left.key.length - right.key.length || left.key.localeCompare(right.key);
+  })[0];
+  return shortestKeyEntry.value;
+}
+
+/**
+ * 原子写回 JSON 文件，并尽量保留原文件权限。
+ * @param {string} filePath - 目标文件路径。
+ * @param {Record<string, any>} payload - 要写入的 JSON 对象。
+ */
+function writeJsonFileAtomically(filePath, payload) {
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  const fileMode = fs.existsSync(filePath) ? fs.statSync(filePath).mode : 0o600;
+  fs.writeFileSync(tempPath, JSON.stringify(payload));
+  fs.chmodSync(tempPath, fileMode);
+  fs.renameSync(tempPath, filePath);
+}
+
+/**
+ * 生成当前时间对应的紧凑文件名时间戳。
+ * @returns {string} 形如 `20260312_184500` 的时间戳。
+ */
+function buildBackupTimestamp() {
+  const now = new Date();
+  const parts = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+    '_',
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0'),
+  ];
+  return parts.join('');
+}
+
+/**
+ * 备份即将修复的 Secure Preferences 文件，便于必要时人工回滚。
+ * @param {string} filePath - 原始文件路径。
+ * @returns {string} 备份文件路径。
+ */
+function backupFileBeforeRepair(filePath) {
+  const backupPath = `${filePath}.bak.tm-webrequest-repair.${buildBackupTimestamp()}`;
+  fs.copyFileSync(filePath, backupPath);
+  return backupPath;
+}
+
+/**
+ * 压缩单个扩展里异常膨胀的 webRequest service worker 子事件，只保留规范键。
+ * @param {Record<string, any>} extensionSetting - 单个扩展的 Secure Preferences 配置。
+ * @param {number} threshold - 触发修复的最小子事件数量。
+ * @returns {{changed: boolean, removedKeys: number, beforeCount: number, afterCount: number}} 修复结果摘要。
+ */
+function compactFilteredWebRequestEvents(extensionSetting, threshold) {
+  const filteredEvents = extensionSetting?.filtered_service_worker_events;
+  if (!filteredEvents || typeof filteredEvents !== 'object' || Array.isArray(filteredEvents)) {
+    return { changed: false, removedKeys: 0, beforeCount: 0, afterCount: 0 };
+  }
+
+  const eventKeys = Object.keys(filteredEvents);
+  const webRequestKeys = eventKeys.filter((key) => key.startsWith('webRequest.'));
+  if (webRequestKeys.length <= threshold) {
+    return {
+      changed: false,
+      removedKeys: 0,
+      beforeCount: webRequestKeys.length,
+      afterCount: webRequestKeys.length,
+    };
+  }
+
+  const groupedEntries = new Map();
+  for (const eventKey of webRequestKeys) {
+    const baseKey = getServiceWorkerEventBaseKey(eventKey);
+    if (!groupedEntries.has(baseKey)) {
+      groupedEntries.set(baseKey, []);
+    }
+    groupedEntries.get(baseKey).push({
+      key: eventKey,
+      value: filteredEvents[eventKey],
+    });
+  }
+
+  const nextFilteredEvents = {};
+  for (const [eventKey, value] of Object.entries(filteredEvents)) {
+    if (!eventKey.startsWith('webRequest.')) {
+      nextFilteredEvents[eventKey] = value;
+    }
+  }
+
+  const canonicalKeys = Array.isArray(extensionSetting.serviceworkerevents)
+    ? extensionSetting.serviceworkerevents.filter((eventKey) => eventKey.startsWith('webRequest.'))
+    : TAMPERMONKEY_CANONICAL_WEBREQUEST_EVENTS;
+  const usedBaseKeys = new Set();
+
+  for (const canonicalKey of canonicalKeys) {
+    const baseKey = getServiceWorkerEventBaseKey(canonicalKey);
+    const entries = groupedEntries.get(baseKey);
+    if (!entries || entries.length === 0) {
+      continue;
+    }
+    nextFilteredEvents[canonicalKey] = selectCanonicalFilteredEventValue(entries, canonicalKey);
+    usedBaseKeys.add(baseKey);
+  }
+
+  for (const [baseKey, entries] of groupedEntries.entries()) {
+    if (usedBaseKeys.has(baseKey) || entries.length === 0) {
+      continue;
+    }
+    const fallbackKey = [...entries].sort((left, right) => {
+      return left.key.length - right.key.length || left.key.localeCompare(right.key);
+    })[0].key;
+    nextFilteredEvents[fallbackKey] = selectCanonicalFilteredEventValue(entries, fallbackKey);
+  }
+
+  const nextWebRequestCount = Object.keys(nextFilteredEvents).filter((key) => key.startsWith('webRequest.')).length;
+  if (nextWebRequestCount >= webRequestKeys.length) {
+    return {
+      changed: false,
+      removedKeys: 0,
+      beforeCount: webRequestKeys.length,
+      afterCount: webRequestKeys.length,
+    };
+  }
+
+  extensionSetting.filtered_service_worker_events = nextFilteredEvents;
+  return {
+    changed: true,
+    removedKeys: webRequestKeys.length - nextWebRequestCount,
+    beforeCount: webRequestKeys.length,
+    afterCount: nextWebRequestCount,
+  };
+}
+
+/**
+ * 删除被修复扩展对应的 Secure Preferences 校验项，避免 Chrome 把修复后的 JSON 视为外部篡改。
+ * @param {Record<string, any>} securePreferences - 已解析的 Secure Preferences 对象。
+ * @param {string} extensionId - 目标扩展 ID。
+ */
+function clearSecurePreferenceProtectionForExtension(securePreferences, extensionId) {
+  const extensionProtection = securePreferences?.protection?.macs?.extensions;
+  if (extensionProtection?.settings && extensionId in extensionProtection.settings) {
+    delete extensionProtection.settings[extensionId];
+  }
+  if (
+    extensionProtection?.settings_encrypted_hash
+    && extensionId in extensionProtection.settings_encrypted_hash
+  ) {
+    delete extensionProtection.settings_encrypted_hash[extensionId];
+  }
+  if (securePreferences?.protection?.super_mac) {
+    delete securePreferences.protection.super_mac;
+  }
+}
+
+/**
+ * 启动前修复 Tampermonkey 在 Secure Preferences 中膨胀的 webRequest 子事件注册。
+ * 这类异常会让 Chrome 在恢复扩展 service worker 监听时卡死，表现为窗口直接“未响应”。
+ * @param {{
+ *   chromeUserDataDir: string,
+ *   chromeRepairTampermonkeyWebRequestOnStart: boolean,
+ *   tampermonkeyWebRequestEventThreshold: number
+ * }} config - 启动配置。
+ * @param {{profileDirectory: string}} profile - 当前要启动的 Chrome profile 信息。
+ */
+function repairTampermonkeyWebRequestExplosion(config, profile) {
+  if (!config.chromeRepairTampermonkeyWebRequestOnStart) {
+    return;
+  }
+
+  const securePreferencesPath = path.join(
+    config.chromeUserDataDir,
+    profile.profileDirectory,
+    'Secure Preferences'
+  );
+  if (!fs.existsSync(securePreferencesPath)) {
+    return;
+  }
+
+  let securePreferences;
+  try {
+    securePreferences = JSON.parse(fs.readFileSync(securePreferencesPath, 'utf8'));
+  } catch (error) {
+    log(`读取 Secure Preferences 失败，跳过 Tampermonkey 修复: ${error.message}`);
+    return;
+  }
+
+  const extensionSettings = securePreferences?.extensions?.settings;
+  if (!extensionSettings || typeof extensionSettings !== 'object') {
+    return;
+  }
+
+  const repairSummaries = [];
+  for (const [extensionId, extensionSetting] of Object.entries(extensionSettings)) {
+    if (!isTampermonkeyExtensionSetting(extensionSetting)) {
+      continue;
+    }
+
+    const result = compactFilteredWebRequestEvents(
+      extensionSetting,
+      config.tampermonkeyWebRequestEventThreshold
+    );
+    if (!result.changed) {
+      continue;
+    }
+
+    clearSecurePreferenceProtectionForExtension(securePreferences, extensionId);
+    repairSummaries.push({
+      extensionId,
+      removedKeys: result.removedKeys,
+      beforeCount: result.beforeCount,
+      afterCount: result.afterCount,
+      name: extensionSetting?.manifest?.name || extensionId,
+    });
+  }
+
+  if (repairSummaries.length === 0) {
+    return;
+  }
+
+  const backupPath = backupFileBeforeRepair(securePreferencesPath);
+  writeJsonFileAtomically(securePreferencesPath, securePreferences);
+
+  for (const summary of repairSummaries) {
+    log(
+      `启动前修复 ${summary.name} (${summary.extensionId}) 的 webRequest 子事件膨胀: `
+      + `${summary.beforeCount} -> ${summary.afterCount}，移除 ${summary.removedKeys} 个重复键；备份 ${backupPath}`
+    );
+  }
+}
+
+/**
+ * 终止当前拉起但未成功就绪的 Chrome 子进程，避免失败实例残留在后台继续占资源。
+ * @param {import('child_process').ChildProcess | null | undefined} child - 待终止的 Chrome 进程句柄。
+ * @param {string} reason - 终止原因，用于日志。
+ */
+function terminateChromeChild(child, reason) {
+  if (!child || child.killed) {
+    return;
+  }
+
+  log(reason);
+  try {
+    child.kill('SIGTERM');
+  } catch (_) {
+    // 启动失败清理阶段忽略 kill 异常，后续仍以端口监听结果为准。
+  }
+}
+
+/**
  * 根据配置解析实际要使用的 Chrome profile。
  * @param {{chromeUserDataDir: string, chromeProfileName: string, chromeProfileDirectory: string}} config - Chrome 配置。
  * @returns {{profileDirectory: string, displayName: string}} 解析后的 profile 信息。
@@ -328,7 +762,6 @@ function getChromeProfile(config) {
 
   return resolveChromeProfile(config.chromeUserDataDir, config.chromeProfileName);
 }
-
 /**
  * 检查本机端口是否已经在监听。
  * @param {number} port - 要检查的端口。
@@ -388,8 +821,64 @@ function spawnChild(command, args, options = {}) {
 }
 
 /**
- * 拉起带 CDP 调试端口的 Chrome，并尝试打开 goofish IM 页面。
- * @param {{cdpPort: number, goofishUrl: string, chromeUserDataDir: string, chromeProfileName: string, chromeProfileDirectory: string}} config - Chrome 启动配置。
+ * 按给定 profile 配置拉起一轮 Chrome，并等待 DevTools 端口就绪。
+ * @param {{
+ *   cdpPort: number,
+ *   goofishUrl: string,
+ *   chromeUserDataDir: string,
+ *   chromeProfileName: string,
+ *   chromeProfileDirectory: string,
+ *   chromeClearTransientDataOnStart: boolean,
+ *   chromeStartTimeoutMs: number
+ * }} config - Chrome 启动配置。
+ * @returns {Promise<{child: import('child_process').ChildProcess, profile: {profileDirectory: string, displayName: string}, ready: boolean}>} 本轮启动结果。
+ */
+async function launchChromeAttempt(config) {
+  ensureChromeUserDataDir(config.chromeUserDataDir);
+  const profile = getChromeProfile(config);
+  clearChromeTransientData(config, profile);
+  repairTampermonkeyWebRequestExplosion(config, profile);
+  const proxyArgs = buildChromeProxyArgs(config);
+
+  const launchBase = getChromeLaunchBase();
+  const launchArgs = [
+    ...launchBase.baseArgs,
+    '--no-first-run',
+    '--allow-insecure-localhost',
+    ...proxyArgs.args,
+    ...(proxyArgs.extensionDirs.length > 0 ? [`--load-extension=${proxyArgs.extensionDirs.join(',')}`] : []),
+    `--remote-debugging-port=${config.cdpPort}`,
+    `--user-data-dir=${config.chromeUserDataDir}`,
+    `--profile-directory=${profile.profileDirectory}`,
+    config.goofishUrl
+  ];
+
+  log(
+    `拉起 Chrome profile "${profile.displayName}" (${profile.profileDirectory})，用户数据目录 ${config.chromeUserDataDir}，监听 ${config.cdpPort}`
+  );
+  if (proxyArgs.logMessage) {
+    log(proxyArgs.logMessage);
+  }
+  const child = spawnChild(launchBase.command, launchArgs, {
+    detached: process.platform !== 'win32',
+    logTargets: [runtimeLogStream],
+  });
+
+  const ready = await waitForPort(config.cdpPort, config.chromeStartTimeoutMs);
+  return { child, profile, ready };
+}
+
+/**
+ * 拉起带 CDP 调试端口的 Chrome；若启动超时则终止失败实例并直接报错。
+ * @param {{
+ *   cdpPort: number,
+ *   goofishUrl: string,
+ *   chromeUserDataDir: string,
+ *   chromeProfileName: string,
+ *   chromeProfileDirectory: string,
+ *   chromeClearTransientDataOnStart: boolean,
+ *   chromeStartTimeoutMs: number
+ * }} config - Chrome 启动配置。
  * @returns {Promise<void>}
  */
 async function ensureChromeDebugging(config) {
@@ -399,36 +888,16 @@ async function ensureChromeDebugging(config) {
     return;
   }
 
-  ensureChromeUserDataDir(config.chromeUserDataDir);
-  const profile = getChromeProfile(config);
-  const proxyArgs = buildChromeProxyArgs(config);
+  const launchAttempt = await launchChromeAttempt(config);
+  if (launchAttempt.ready) {
+    return;
+  }
 
-  const launchBase = getChromeLaunchBase();
-  const launchArgs = [
-    ...launchBase.baseArgs,
-    '--no-first-run',
-    ...proxyArgs.args,
-    `--remote-debugging-port=${config.cdpPort}`,
-    `--user-data-dir=${config.chromeUserDataDir}`,
-    `--profile-directory=${profile.profileDirectory}`,
-    config.goofishUrl,
-  ];
-
-  log(
-    `拉起 Chrome profile "${profile.displayName}" (${profile.profileDirectory})，用户数据目录 ${config.chromeUserDataDir}，监听 ${config.cdpPort}`
+  terminateChromeChild(
+    launchAttempt.child,
+    `Chrome 启动超时，${config.chromeStartTimeoutMs}ms 内未开放 ${config.cdpPort}，准备结束当前实例`
   );
-  if (proxyArgs.logMessage) {
-    log(proxyArgs.logMessage);
-  }
-  spawnChild(launchBase.command, launchArgs, {
-    detached: process.platform !== 'win32',
-    logTargets: [runtimeLogStream],
-  });
-
-  const ready = await waitForPort(config.cdpPort, 15000);
-  if (!ready) {
-    throw new Error(`Chrome 未在 15 秒内开放 ${config.cdpPort} 调试端口`);
-  }
+  throw new Error(`Chrome 未在 ${config.chromeStartTimeoutMs}ms 内开放 ${config.cdpPort} 调试端口`);
 }
 
 /**
@@ -544,6 +1013,8 @@ async function main() {
   const chromeProxyConfigPath =
     process.env.CHROME_PROXY_CONFIG_PATH || DEFAULT_CHROME_PROXY_CONFIG_PATH;
   const localChromeProxyConfig = readLocalJsonConfig(chromeProxyConfigPath);
+  const chromeProxyDisabled = process.env.CHROME_PROXY_DISABLED === '1';
+  const rawTampermonkeyThreshold = Number(process.env.CHROME_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD);
   const config = {
     watch: args.watch,
     serverPort: Number(process.env.PORT || DEFAULT_SERVER_PORT),
@@ -560,26 +1031,44 @@ async function main() {
     goofishUrl: process.env.GOOFISH_URL || DEFAULT_GOOFISH_URL,
     runtimeLogPath: process.env.RUNTIME_LOG_PATH || DEFAULT_RUNTIME_LOG_PATH,
     apiLogPath: process.env.API_LOG_PATH || DEFAULT_API_LOG_PATH,
+    chromeProxyDisabled,
     chromeProxyServer:
-      process.env.CHROME_PROXY_SERVER || localChromeProxyConfig.proxyServer || '',
+      chromeProxyDisabled ? '' : process.env.CHROME_PROXY_SERVER || localChromeProxyConfig.proxyServer || '',
     chromeProxyScheme:
       process.env.CHROME_PROXY_SCHEME ||
       localChromeProxyConfig.proxyScheme ||
       DEFAULT_CHROME_PROXY_SCHEME,
     chromeProxyUsername:
-      process.env.CHROME_PROXY_USERNAME || localChromeProxyConfig.proxyUsername || '',
+      chromeProxyDisabled ? '' : process.env.CHROME_PROXY_USERNAME || localChromeProxyConfig.proxyUsername || '',
     chromeProxyPassword:
-      process.env.CHROME_PROXY_PASSWORD || localChromeProxyConfig.proxyPassword || '',
+      chromeProxyDisabled ? '' : process.env.CHROME_PROXY_PASSWORD || localChromeProxyConfig.proxyPassword || '',
     chromeProxyBypassList:
       process.env.CHROME_PROXY_BYPASS_LIST ||
       localChromeProxyConfig.proxyBypassList ||
       DEFAULT_CHROME_PROXY_BYPASS_LIST,
     chromeProxyExtensionDir: DEFAULT_CHROME_PROXY_EXTENSION_DIR,
+    chromeClearTransientDataOnStart:
+      process.env.CHROME_CLEAR_TRANSIENT_DATA_ON_START === '0'
+        ? false
+        : DEFAULT_CHROME_CLEAR_TRANSIENT_DATA_ON_START,
+    chromeStartTimeoutMs: Number(process.env.CHROME_START_TIMEOUT_MS || DEFAULT_CHROME_START_TIMEOUT_MS),
+    chromeRepairTampermonkeyWebRequestOnStart:
+      process.env.CHROME_REPAIR_TAMPERMONKEY_WEBREQUEST_ON_START === '0'
+        ? false
+        : DEFAULT_CHROME_REPAIR_TAMPERMONKEY_WEBREQUEST_ON_START,
+    tampermonkeyWebRequestEventThreshold:
+      Number.isFinite(rawTampermonkeyThreshold) && rawTampermonkeyThreshold > 0
+        ? rawTampermonkeyThreshold
+        : DEFAULT_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD,
   };
 
   setupLogStreams(config);
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  if (config.chromeProxyDisabled) {
+    log('已通过 CHROME_PROXY_DISABLED=1 禁用项目 Chrome 代理');
+  }
 
   await ensureChromeDebugging(config);
   startChromeWatchdog(config);

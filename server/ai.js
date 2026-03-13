@@ -39,6 +39,33 @@ const API_KEY = process.env.OPENAI_API_KEY || LOCAL_AI_CONFIG.apiKey || '';
 const BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.deepseek.com';
 const MODEL = process.env.OPENAI_MODEL || 'deepseek-chat';
 
+const SIZE_RECOMMENDATION_RULES = Object.freeze({
+    size_chart_type: 'recommendation_by_weight',
+    weight_basis: 'jin',
+    weight_unit: 'jin',
+    weight_conversion: {
+        from: 'kg',
+        to: 'jin',
+        rule: 'weight_jin = weight_kg * 2'
+    },
+    inventory_constraints: {
+        max_available_size: '3XL',
+        unavailable_sizes: ['4XL']
+    },
+    rules: [
+        { weight_jin_min: 80, weight_jin_max: 90, recommended_size: 'S' },
+        { weight_jin_min: 91, weight_jin_max: 103, recommended_size: 'M' },
+        { weight_jin_min: 103, weight_jin_max: 113, recommended_size: 'L' },
+        { weight_jin_min: 113, weight_jin_max: 122, recommended_size: 'XL' },
+        { weight_jin_min: 122, weight_jin_max: 131, recommended_size: '2XL' },
+        { weight_jin_min: 131, weight_jin_max: 140, recommended_size: '3XL' }
+    ],
+    notes: [
+        '本尺码推荐按体重（斤）划分；若输入为公斤(kg)，需先乘以2换算为斤。',
+        '当前库存最大到3XL，4XL无库存，故推荐规则不包含4XL。'
+    ]
+});
+
 const SYSTEM_PROMPT = `你是一位友善、专业的闲鱼卖家客服。请遵守以下规则：
 
 1. 用口语化、亲切的语气回复，像真人卖家一样。
@@ -49,6 +76,50 @@ const SYSTEM_PROMPT = `你是一位友善、专业的闲鱼卖家客服。请遵
 6. 不要暴露你是 AI 或自动化系统。
 7. 不要主动提及退款、投诉等敏感话题。
 8. 如果遇到无法回答的问题，回复"稍等，我确认一下~"。`;
+
+/**
+ * 将尺码推荐配置格式化为可注入 LLM 的 system prompt 文本。
+ * @param {typeof SIZE_RECOMMENDATION_RULES} ruleConfig - 尺码推荐配置。
+ * @returns {string} 供模型直接遵守的尺码规则说明。
+ */
+function buildSizeRecommendationPrompt(ruleConfig) {
+    const recommendationLines = ruleConfig.rules.map(rule =>
+        `- ${rule.weight_jin_min}-${rule.weight_jin_max}斤推荐 ${rule.recommended_size}`
+    );
+    const unavailableSizes = (ruleConfig.inventory_constraints?.unavailable_sizes || []).join('、');
+    const noteLines = (ruleConfig.notes || []).map(note => `- ${note}`);
+
+    return [
+        '以下尺码推荐规则必须严格执行：',
+        `- 尺码表类型：${ruleConfig.size_chart_type}`,
+        `- 推荐依据：按体重（${ruleConfig.weight_unit}）推荐尺码`,
+        `- 公斤换算规则：${ruleConfig.weight_conversion.rule}`,
+        `- 当前最大可售尺码：${ruleConfig.inventory_constraints?.max_available_size || ''}`,
+        `- 无库存尺码：${unavailableSizes || '无'}`,
+        ...recommendationLines,
+        ...noteLines,
+        '- 如果买家问尺码、体重、斤、公斤、kg、穿多大等问题，优先按上述规则回答。',
+        '- 如果买家直接问4XL，必须明确说明当前4XL无库存，最大到3XL。',
+        '- 如果买家提供的是公斤，先换算成斤后再推荐。',
+        '- 如果买家提供的信息不足或体重超出上述范围，不要瞎推荐，先让对方补充身高体重。'
+    ].join('\n');
+}
+
+/**
+ * 判断当前对话是否在询问尺码/体重相关问题。
+ * @param {{role: string, content: string}[]} chatHistory - 当前聊天历史。
+ * @returns {boolean} 是否需要注入尺码推荐规则。
+ */
+function shouldInjectSizeRecommendation(chatHistory = []) {
+    const recentBuyerMessage = [...chatHistory]
+        .reverse()
+        .find(message => message.role === 'buyer' && message.content);
+    if (!recentBuyerMessage) {
+        return false;
+    }
+
+    return /尺码|码数|穿多大|多大码|体重|斤|公斤|kg|KG|xl|2xl|3xl|4xl|推荐.*码/.test(recentBuyerMessage.content);
+}
 
 /**
  * 生成自动回复
@@ -77,6 +148,13 @@ async function generateReply(chatHistory, productInfo = {}) {
                 content: `当前商品信息：\n${parts.join('\n')}`
             });
         }
+    }
+
+    if (shouldInjectSizeRecommendation(chatHistory)) {
+        messages.push({
+            role: 'system',
+            content: buildSizeRecommendationPrompt(SIZE_RECOMMENDATION_RULES)
+        });
     }
 
     // Map chat history to OpenAI format

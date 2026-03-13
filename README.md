@@ -13,6 +13,10 @@
 - 本地控制台：在 `http://127.0.0.1:3210` 查看会话、消息、待发队列
 - 人工回复：UI 右侧输入框会把消息压入 `pending` 队列，再由浏览器发送
 - AI 开关：UI 顶栏支持全局开启/关闭 AI 自动回复，便于人工接管
+- 巡逻开关：UI 顶栏支持远程开启 / 关闭油猴后台巡逻；不影响精准发送与按需补水
+- 启动初始化：项目启动后会先限量初始化同步会话历史，默认拉前 `30` 个会话
+- 未读监听：初始化完成后默认关闭自动巡逻，改为根据左侧未读角标增量同步新消息
+- 精准发送：浏览器脚本会主动 claim 待发任务，并优先按 `session_id` 定位目标会话后发送
 - 自动回复：Worker 消费 `outbox.new_messages`，生成回复后写入 `outgoing_messages`
 - 项目专用 Chrome：`npm start` 会自动拉起带 `18800` 调试端口的项目 Chrome
 - Chrome 代理：支持通过本地配置文件或环境变量给项目 Chrome 单独配置代理
@@ -23,7 +27,7 @@
 ```text
 goofishAggregation/
 ├── xianyu_capture/
-│   └── xianyu_monitor.js      # Tampermonkey 脚本（当前面板版本 3.5）
+│   └── xianyu_monitor.js      # Tampermonkey 脚本（当前面板版本 4.0）
 ├── server/
 │   ├── package.json           # Node 依赖与脚本
 │   ├── start.js               # 统一启动器：Chrome + API + sync.js
@@ -75,12 +79,29 @@ npm start
 默认会做这些事：
 
 - 使用仓库下的项目专用 Chrome 目录 `.chrome-xianyu-profile`
+- 启动前自动清理项目 Chrome 的瞬态缓存与残留锁文件，尽量降低 profile 损坏导致的卡死风险
 - 拉起 Chrome，并打开 `https://www.goofish.com/im`
+- 为项目 Chrome 增加 `--allow-insecure-localhost`，允许脚本连接本地自签 `wss://localhost`
 - 为 Chrome 开启 `18800` 调试端口
 - 启动 API 服务 `127.0.0.1:3210`
+- 启动浏览器脚本专用 `wss://localhost:3211/ws/browser`
 - 启动 `sync.js`
 - 启动内置自动回复 worker
 - 监控 `18800`，如果项目 Chrome 被关掉会自动拉起
+
+如果要排查代理是否导致项目 Chrome 启动异常，可以临时这样启动：
+
+```bash
+cd /Users/snoopy/Desktop/goofishAggregation/server
+CHROME_PROXY_DISABLED=1 npm start
+```
+
+如果你明确要保留当前缓存现场、不执行启动前清理，也可以临时关闭：
+
+```bash
+cd /Users/snoopy/Desktop/goofishAggregation/server
+CHROME_CLEAR_TRANSIENT_DATA_ON_START=0 npm start
+```
 
 ### 2. 开发模式
 
@@ -120,7 +141,13 @@ npm run worker:dry:once
 
 - [xianyu_capture/xianyu_monitor.js](/Users/snoopy/Desktop/goofishAggregation/xianyu_capture/xianyu_monitor.js)
 
-当前面板版本为 `3.5`。每次脚本更新后，请确认 Tampermonkey 中版本文案也同步更新。
+当前面板版本为 `4.0`。每次脚本更新后，请确认 Tampermonkey 中版本文案也同步更新。
+
+当前脚本与本地服务的控制链路不再依赖高频 HTTP 轮询，而是走单条长连接：
+
+- `wss://localhost:3211/ws/browser`
+
+项目启动时会自动为 localhost 生成一套本地开发证书，并让项目 Chrome 接受 localhost 自签证书。
 
 ### 3. 登录闲鱼网页版
 
@@ -128,7 +155,13 @@ npm run worker:dry:once
 
 - [goofish.com/im](https://www.goofish.com/im)
 
-脚本会自动开始巡逻抓取，并向本地 API 上报数据。
+脚本默认会先做一轮启动初始化：限量遍历前 `30` 个会话并尽量拉回历史记录，随后自动关闭常驻巡逻。
+
+初始化完成后：
+
+- 当前打开的会话会继续做轻量同步
+- 左侧带未读角标的会话会被按需打开并增量同步
+- 全量遍历只保留给手动开启巡逻和精准发送 fallback 使用
 
 ## 3210 控制台说明
 
@@ -141,6 +174,7 @@ npm run worker:dry:once
 - 左侧会话列表增量刷新，减少轮询闪烁
 - 右侧消息区主动刷新，当前会话有新消息时无需重新点左侧会话
 - 顶栏 AI 开关：全局开启 / 关闭自动回复
+- 顶栏巡逻开关：远程控制油猴后台巡逻，并显示脚本同步状态
 - 右侧人工回复输入框：消息先入 `pending` 队列，再由浏览器发送
 - 待发队列面板：区分 `AI` / `人工` 来源
 
@@ -162,12 +196,18 @@ npm run worker:dry:once
 ### Chrome / 启动器相关
 
 - `PORT`：本地 API 端口，默认 `3210`
+- `BROWSER_WSS_PORT`：浏览器脚本专用 WSS 端口，默认 `3211`
+- `BROWSER_WSS_PATH`：浏览器脚本专用 WSS 路径，默认 `/ws/browser`
+- `BROWSER_WSS_CERT_PATH`：可选，自定义 localhost WSS 证书路径
+- `BROWSER_WSS_KEY_PATH`：可选，自定义 localhost WSS 私钥路径
 - `CDP_PORT`：Chrome DevTools 调试端口，默认 `18800`
 - `SYNC_INTERVAL`：`sync.js` 轮询间隔，默认 `5000`
 - `CHROME_PROFILE_NAME`：日志里显示的 profile 名，默认 `xianyu`
 - `CHROME_PROFILE_DIRECTORY`：项目 Chrome 目录中的 profile 目录名，默认 `Default`
 - `CHROME_USER_DATA_DIR`：项目 Chrome 用户数据目录，默认仓库下 `.chrome-xianyu-profile`
 - `CHROME_MONITOR_INTERVAL_MS`：Chrome watchdog 检测间隔，默认 `3000`
+- `CHROME_CLEAR_TRANSIENT_DATA_ON_START`：启动前是否清理项目 Chrome 瞬态缓存，默认开启
+- `CHROME_START_TIMEOUT_MS`：等待 Chrome 打开 CDP 端口的超时时间，默认 `15000`
 
 ### Chrome 代理相关
 
@@ -224,16 +264,18 @@ npm run worker:dry:once
 - `sessions`：会话主表
 - `messages`：聊天消息
 - `outbox`：内部事件总线（`new_session` / `new_messages`）
-- `outgoing_messages`：待发送消息队列（`pending / sent / failed`）
+- `outgoing_messages`：待发送消息队列（`pending / sending / sent / failed`）
 - `app_settings`：运行时设置，例如 AI 开关
 
 当前发送链路是：
 
 1. 新消息进入 `outbox`
 2. worker 生成回复，写入 `outgoing_messages.pending`
-3. 油猴脚本巡逻到对应会话时，匹配 `chat_key`
-4. 浏览器自动填写并发送
-5. API 回写状态为 `sent` 或 `failed`
+3. 浏览器 sender loop 原子 claim 一条待发任务
+4. 优先按 `session_id` 精准定位目标会话；定位失败时再做限次 fallback 遍历补水
+5. 浏览器自动填写并发送
+6. 发送后立即补抓当前会话，保证新消息及时写回本地缓存
+7. API 回写状态为 `sent` 或 `failed`
 
 ## 常见问题
 
@@ -262,12 +304,19 @@ cd /Users/snoopy/Desktop/goofishAggregation/server
 npm start
 ```
 
+如果要临时绕过代理做故障排查，可以直接用：
+
+```bash
+cd /Users/snoopy/Desktop/goofishAggregation/server
+CHROME_PROXY_DISABLED=1 npm start
+```
+
 ## 当前已知限制
 
 - 当前启动器只支持一个项目 Chrome 实例，还不能直接在同一个 `3210` 控制台里安全聚合多个卖家账号
 - `server/ai.js` 目前仍然保留了默认 API key fallback，生产环境不建议继续沿用
 - `outbox` 事件当前是“读后处理、处理完再标记”，如果同时运行多个 worker，存在重复消费风险
-- 当前油猴发送器是“按当前巡逻到的会话匹配该会话的第一条 pending”，不是严格的全局 FIFO 队列
+- 当前精准发送仍依赖闲鱼页面内可读取的 `sessionInfo.sessionId`；如果页面结构变化，会退回到限次 fallback 遍历补水
 
 ## 下一步开发计划
 
