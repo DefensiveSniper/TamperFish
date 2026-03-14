@@ -10,6 +10,7 @@ const DEFAULT_SERVER_PORT = 3210;
 const DEFAULT_SYNC_INTERVAL = 5000;
 const DEFAULT_PROFILE_NAME = 'xianyu';
 const DEFAULT_GOOFISH_URL = 'https://www.goofish.com/im';
+const DEFAULT_QIANNIU_URL = 'https://myseller.taobao.com/home.htm/batch-consign';
 const DEFAULT_CHROME_MONITOR_INTERVAL_MS = 3000;
 const DEFAULT_CHROME_USER_DATA_DIR = path.join(__dirname, '..', '.chrome-xianyu-profile');
 const DEFAULT_CHROME_PROFILE_DIRECTORY = 'Default';
@@ -42,7 +43,9 @@ const CHROME_PROFILE_TRANSIENT_ENTRIES = [
   'DawnGraphiteCache',
   'DawnWebGPUCache',
   'blob_storage',
-  'Sessions',
+  // 注意：不清理 Sessions 目录——Chrome 需要它来恢复上次会话并保留 session cookie。
+  // 千牛 (myseller.taobao.com) 的登录态依赖 session cookie，清掉 Sessions 会导致
+  // Chrome 视为全新启动并清除所有 session cookie，每次重启都要重新登录。
   'Session Storage',
   'Service Worker',
   'Platform Notifications',
@@ -763,6 +766,43 @@ function getChromeProfile(config) {
   return resolveChromeProfile(config.chromeUserDataDir, config.chromeProfileName);
 }
 /**
+ * 汇总 Chrome 启动时要直接打开的业务页面 URL，并去掉空值与重复项。
+ * @param {{goofishUrl?: string, qianniuUrl?: string}} config - 启动配置。
+ * @returns {string[]} 去重后的启动 URL 列表。
+ */
+function buildChromeStartupUrls(config) {
+  const urls = [
+    config.goofishUrl,
+    config.qianniuUrl,
+  ]
+    .map((url) => String(url || '').trim())
+    .filter(Boolean);
+
+  return [...new Set(urls)];
+}
+
+/**
+ * 判断指定 profile 中是否存在可用的上次会话恢复数据。
+ * Chrome 需要 Sessions 目录中的 Session_/Tabs_ 文件来执行 --restore-last-session。
+ * @param {string} chromeUserDataDir - Chrome 用户数据根目录。
+ * @param {string} profileDirectory - profile 目录名。
+ * @returns {boolean} 是否存在上次会话数据。
+ */
+function hasPreviousSessionData(chromeUserDataDir, profileDirectory) {
+  const sessionsDir = path.join(chromeUserDataDir, profileDirectory, 'Sessions');
+  if (!fs.existsSync(sessionsDir)) {
+    return false;
+  }
+
+  try {
+    const entries = fs.readdirSync(sessionsDir);
+    return entries.some((name) => name.startsWith('Session_') || name.startsWith('Tabs_'));
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * 检查本机端口是否已经在监听。
  * @param {number} port - 要检查的端口。
  * @returns {Promise<boolean>} 端口是否可连接。
@@ -825,6 +865,7 @@ function spawnChild(command, args, options = {}) {
  * @param {{
  *   cdpPort: number,
  *   goofishUrl: string,
+ *   qianniuUrl: string,
  *   chromeUserDataDir: string,
  *   chromeProfileName: string,
  *   chromeProfileDirectory: string,
@@ -840,22 +881,29 @@ async function launchChromeAttempt(config) {
   repairTampermonkeyWebRequestExplosion(config, profile);
   const proxyArgs = buildChromeProxyArgs(config);
 
+  // 有上次会话时走 --restore-last-session 恢复标签页与 session cookie，不再重复传入 URL；
+  // 首次启动（无会话数据）时正常传入启动页 URL。
+  const canRestore = hasPreviousSessionData(config.chromeUserDataDir, profile.profileDirectory);
+  const startupUrls = canRestore ? [] : buildChromeStartupUrls(config);
+
   const launchBase = getChromeLaunchBase();
   const launchArgs = [
     ...launchBase.baseArgs,
     '--no-first-run',
     '--allow-insecure-localhost',
+    ...(canRestore ? ['--restore-last-session'] : []),
     ...proxyArgs.args,
     ...(proxyArgs.extensionDirs.length > 0 ? [`--load-extension=${proxyArgs.extensionDirs.join(',')}`] : []),
     `--remote-debugging-port=${config.cdpPort}`,
     `--user-data-dir=${config.chromeUserDataDir}`,
     `--profile-directory=${profile.profileDirectory}`,
-    config.goofishUrl
+    ...startupUrls
   ];
 
   log(
     `拉起 Chrome profile "${profile.displayName}" (${profile.profileDirectory})，用户数据目录 ${config.chromeUserDataDir}，监听 ${config.cdpPort}`
   );
+  log(canRestore ? '恢复上次会话（保留 session cookie）' : `启动页: ${buildChromeStartupUrls(config).join(' , ')}`);
   if (proxyArgs.logMessage) {
     log(proxyArgs.logMessage);
   }
@@ -873,6 +921,7 @@ async function launchChromeAttempt(config) {
  * @param {{
  *   cdpPort: number,
  *   goofishUrl: string,
+ *   qianniuUrl: string,
  *   chromeUserDataDir: string,
  *   chromeProfileName: string,
  *   chromeProfileDirectory: string,
@@ -1014,6 +1063,7 @@ async function main() {
     process.env.CHROME_PROXY_CONFIG_PATH || DEFAULT_CHROME_PROXY_CONFIG_PATH;
   const localChromeProxyConfig = readLocalJsonConfig(chromeProxyConfigPath);
   const chromeProxyDisabled = process.env.CHROME_PROXY_DISABLED === '1';
+  const chromeClearTransientDataEnv = process.env.CHROME_CLEAR_TRANSIENT_DATA_ON_START;
   const rawTampermonkeyThreshold = Number(process.env.CHROME_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD);
   const config = {
     watch: args.watch,
@@ -1029,6 +1079,7 @@ async function main() {
       process.env.CHROME_MONITOR_INTERVAL_MS || DEFAULT_CHROME_MONITOR_INTERVAL_MS
     ),
     goofishUrl: process.env.GOOFISH_URL || DEFAULT_GOOFISH_URL,
+    qianniuUrl: process.env.QIANNIU_URL || DEFAULT_QIANNIU_URL,
     runtimeLogPath: process.env.RUNTIME_LOG_PATH || DEFAULT_RUNTIME_LOG_PATH,
     apiLogPath: process.env.API_LOG_PATH || DEFAULT_API_LOG_PATH,
     chromeProxyDisabled,
@@ -1048,8 +1099,10 @@ async function main() {
       DEFAULT_CHROME_PROXY_BYPASS_LIST,
     chromeProxyExtensionDir: DEFAULT_CHROME_PROXY_EXTENSION_DIR,
     chromeClearTransientDataOnStart:
-      process.env.CHROME_CLEAR_TRANSIENT_DATA_ON_START === '0'
+      chromeClearTransientDataEnv === '0'
         ? false
+        : chromeClearTransientDataEnv === '1'
+        ? true
         : DEFAULT_CHROME_CLEAR_TRANSIENT_DATA_ON_START,
     chromeStartTimeoutMs: Number(process.env.CHROME_START_TIMEOUT_MS || DEFAULT_CHROME_START_TIMEOUT_MS),
     chromeRepairTampermonkeyWebRequestOnStart:

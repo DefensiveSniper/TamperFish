@@ -1,16 +1,21 @@
 # 闲鱼聊天记录聚合服务 (goofishAggregation)
 
-这是一个围绕闲鱼 PC Web 会话做本地聚合、人工接管和自动回复的工具集。当前仓库已经打通了 4 条链路：
+这是一个围绕闲鱼 PC Web 消息链路和千牛待发货订单链路做本地聚合、人工接管和自动回复的工具集。当前仓库已经打通了 6 条链路：
 
-1. 油猴脚本在 `goofish.com/im` 页面采集会话与消息
-2. `sync.js` 通过 Chrome CDP 定时读取浏览器本地缓存并补采
-3. 本地 API + SQLite 聚合数据，并在 `3210` 提供管理控制台
-4. 待发消息进入 `outgoing_messages` 队列，由浏览器脚本自动回填发送
+1. 油猴脚本在 `goofish.com/im` 页面采集会话、消息和会话侧元数据
+2. `sync.js` 通过 Chrome CDP 定时读取浏览器本地缓存并补采闲鱼消息
+3. 千牛油猴脚本在 `myseller.taobao.com/home.htm/batch-consign` 页面采集待发货订单
+4. 本地 API + SQLite 聚合会话、消息、订单，并在 `3210` 提供管理控制台
+5. 待发消息进入 `outgoing_messages` 队列，由浏览器脚本自动回填发送
+6. 千牛订单按 `buyer_user_id + product_id` 与闲鱼会话自动关联，并展示到控制台和聊天头部
 
 ## 核心能力
 
 - 会话聚合：前台油猴脚本与后台 CDP 双路采集，消息落地到 SQLite
+- 千牛订单采集：解析 `batch-consign` 订单卡片，落库订单号、买家、商品、金额、数量和收件信息
+- 订单关联：按 `buyer_user_id + product_id` 将千牛订单精准关联到闲鱼会话
 - 本地控制台：在 `http://127.0.0.1:3210` 查看会话、消息、待发队列
+- 订单控制台：订单抽屉支持查看脚本运行态、立即同步当前页和手动全量扫描
 - 人工回复：UI 右侧输入框会把消息压入 `pending` 队列，再由浏览器发送
 - AI 开关：UI 顶栏支持全局开启/关闭 AI 自动回复，便于人工接管
 - 巡逻开关：UI 顶栏支持远程开启 / 关闭油猴后台巡逻；不影响精准发送与按需补水
@@ -26,6 +31,8 @@
 
 ```text
 goofishAggregation/
+├── qianniu_capture/
+│   └── qianniu_batch_consign.js # Tampermonkey 脚本：千牛待发货订单采集
 ├── xianyu_capture/
 │   └── xianyu_monitor.js      # Tampermonkey 脚本（当前面板版本 4.0）
 ├── server/
@@ -79,8 +86,9 @@ npm start
 默认会做这些事：
 
 - 使用仓库下的项目专用 Chrome 目录 `.chrome-xianyu-profile`
-- 启动前自动清理项目 Chrome 的瞬态缓存与残留锁文件，尽量降低 profile 损坏导致的卡死风险
-- 拉起 Chrome，并打开 `https://www.goofish.com/im`
+- 启动前自动清理项目 Chrome 的瞬态缓存与残留锁文件，但保留 `Sessions`，以便恢复上次会话和 session cookie
+- 如果 profile 中存在上次会话数据，则使用 Chrome 会话恢复模式启动，不重复注入初始 URL
+- 如果是首次启动或当前 profile 没有可恢复会话，则自动打开 `https://www.goofish.com/im` 与 `https://myseller.taobao.com/home.htm/batch-consign`
 - 为项目 Chrome 增加 `--allow-insecure-localhost`，允许脚本连接本地自签 `wss://localhost`
 - 为 Chrome 开启 `18800` 调试端口
 - 启动 API 服务 `127.0.0.1:3210`
@@ -140,8 +148,10 @@ npm run worker:dry:once
 导入并启用：
 
 - [xianyu_capture/xianyu_monitor.js](/Users/snoopy/Desktop/goofishAggregation/xianyu_capture/xianyu_monitor.js)
+- [qianniu_capture/qianniu_batch_consign.js](/Users/snoopy/Desktop/goofishAggregation/qianniu_capture/qianniu_batch_consign.js)
 
-当前面板版本为 `4.0`。每次脚本更新后，请确认 Tampermonkey 中版本文案也同步更新。
+当前闲鱼脚本面板版本为 `4.0`，千牛订单脚本版本为 `1.4`。每次脚本更新后，请确认 Tampermonkey 中版本文案也同步更新。
+千牛订单脚本首次导入后，请允许脚本访问 `trade.taobao.com`，用于抓取 `tradeSnap` 页面中的商品 ID。
 
 当前脚本与本地服务的控制链路不再依赖高频 HTTP 轮询，而是走单条长连接：
 
@@ -149,11 +159,20 @@ npm run worker:dry:once
 
 项目启动时会自动为 localhost 生成一套本地开发证书，并让项目 Chrome 接受 localhost 自签证书。
 
-### 3. 登录闲鱼网页版
+### 3. 登录闲鱼 / 千牛网页版
 
-在项目 Chrome 中打开并保持：
+在项目 Chrome 中完成一次登录后，后续启动会优先恢复上次会话：
 
 - [goofish.com/im](https://www.goofish.com/im)
+- [myseller.taobao.com/home.htm/batch-consign](https://myseller.taobao.com/home.htm/batch-consign)
+
+说明：
+
+- 闲鱼消息脚本运行在 `goofish.com/im`
+- 千牛订单脚本运行在 `batch-consign`
+- 千牛脚本会按 `orderId` 缓存已解密的买家信息；成功解密过的订单后续不再重复点击“解密”
+- 首次启动或使用全新 profile 时，启动器会自动打开闲鱼和千牛入口页
+- 如果当前 profile 中已有上次会话，启动器会恢复原有标签页和 session cookie，通常不需要手动重新打开千牛页面
 
 脚本默认会先做一轮启动初始化：限量遍历前 `30` 个会话并尽量拉回历史记录，随后自动关闭常驻巡逻。
 
@@ -173,10 +192,12 @@ npm run worker:dry:once
 
 - 左侧会话列表增量刷新，减少轮询闪烁
 - 右侧消息区主动刷新，当前会话有新消息时无需重新点左侧会话
+- 顶栏订单抽屉：查看千牛待发货订单、关联状态与脚本运行态，并支持立即同步当前页与手动全量扫描
 - 顶栏 AI 开关：全局开启 / 关闭自动回复
 - 顶栏巡逻开关：远程控制油猴后台巡逻，并显示脚本同步状态
 - 右侧人工回复输入框：消息先入 `pending` 队列，再由浏览器发送
 - 待发队列面板：区分 `AI` / `人工` 来源
+- 会话头部订单摘要：已精准关联的订单会显示在对应聊天顶部
 
 ## 环境变量与本地配置
 
@@ -205,8 +226,10 @@ npm run worker:dry:once
 - `CHROME_PROFILE_NAME`：日志里显示的 profile 名，默认 `xianyu`
 - `CHROME_PROFILE_DIRECTORY`：项目 Chrome 目录中的 profile 目录名，默认 `Default`
 - `CHROME_USER_DATA_DIR`：项目 Chrome 用户数据目录，默认仓库下 `.chrome-xianyu-profile`
+- `GOOFISH_URL`：首次启动时默认打开的闲鱼页面，默认 `https://www.goofish.com/im`
+- `QIANNIU_URL`：首次启动时默认打开的千牛页面，默认 `https://myseller.taobao.com/home.htm/batch-consign`
 - `CHROME_MONITOR_INTERVAL_MS`：Chrome watchdog 检测间隔，默认 `3000`
-- `CHROME_CLEAR_TRANSIENT_DATA_ON_START`：启动前是否清理项目 Chrome 瞬态缓存，默认开启
+- `CHROME_CLEAR_TRANSIENT_DATA_ON_START`：启动前是否清理项目 Chrome 瞬态缓存，默认开启；保留 `Sessions` 用于恢复上次会话，设为 `0` 可关闭
 - `CHROME_START_TIMEOUT_MS`：等待 Chrome 打开 CDP 端口的超时时间，默认 `15000`
 
 ### Chrome 代理相关

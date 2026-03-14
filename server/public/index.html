@@ -809,6 +809,429 @@
       transform: none;
     }
 
+    /* ── Orders ── */
+    .chat-order-stack {
+      margin-top: 10px;
+      display: grid;
+      gap: 8px;
+      max-width: 840px;
+    }
+
+    .chat-order-card {
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(240, 192, 32, .18);
+      background: linear-gradient(135deg, rgba(240, 192, 32, .1), rgba(36, 51, 80, .8));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+    }
+
+    .chat-order-card .top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 11px;
+      color: var(--text2);
+    }
+
+    .chat-order-card .oid {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent2);
+      letter-spacing: .2px;
+    }
+
+    .chat-order-card .status {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(251, 191, 36, .24);
+      background: rgba(251, 191, 36, .1);
+      color: var(--pending);
+      font-weight: 700;
+    }
+
+    .chat-order-card .title {
+      margin-top: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .chat-order-card .meta {
+      margin-top: 6px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 11px;
+      color: var(--text2);
+    }
+
+    #orders-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(6, 10, 16, .55);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .2s ease;
+      z-index: 18;
+    }
+
+    #orders-overlay.show {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    #orders-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: min(480px, 100vw);
+      height: 100vh;
+      background: linear-gradient(180deg, rgba(12, 18, 30, .98), rgba(9, 14, 24, .98));
+      border-left: 1px solid var(--border2);
+      box-shadow: -18px 0 42px rgba(0, 0, 0, .32);
+      transform: translateX(100%);
+      transition: transform .24s ease;
+      z-index: 19;
+      display: flex;
+      flex-direction: column;
+      backdrop-filter: blur(16px);
+    }
+
+    #orders-drawer.show {
+      transform: translateX(0);
+    }
+
+    .orders-drawer-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 18px 14px;
+      border-bottom: 1px solid rgba(36, 51, 80, .75);
+    }
+
+    .orders-drawer-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .orders-drawer-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      background: var(--accent-g);
+      color: #111;
+      font-size: 16px;
+      box-shadow: 0 8px 20px rgba(240, 192, 32, .2);
+    }
+
+    .orders-drawer-name {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -.2px;
+    }
+
+    .orders-drawer-subtitle {
+      margin-top: 2px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .orders-close-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text2);
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all .15s;
+    }
+
+    .orders-close-btn:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(240, 192, 32, .08);
+    }
+
+    .orders-runtime {
+      margin: 16px 18px 0;
+      padding: 14px;
+      border-radius: 16px;
+      background: radial-gradient(circle at top left, rgba(240, 192, 32, .12), rgba(23, 32, 54, .9));
+      border: 1px solid rgba(240, 192, 32, .16);
+      display: grid;
+      gap: 10px;
+    }
+
+    .orders-runtime-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .orders-runtime-heading {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .orders-runtime-page {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .orders-runtime-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .orders-runtime-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid rgba(255, 255, 255, .08);
+    }
+
+    .orders-runtime-status::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 10px currentColor;
+    }
+
+    .orders-runtime-status.online {
+      color: var(--success);
+      background: rgba(52, 211, 153, .1);
+      border-color: rgba(52, 211, 153, .24);
+    }
+
+    .orders-runtime-status.scanning {
+      color: var(--pending);
+      background: rgba(251, 191, 36, .1);
+      border-color: rgba(251, 191, 36, .24);
+    }
+
+    .orders-runtime-status.offline {
+      color: #ffb4b4;
+      background: rgba(248, 113, 113, .08);
+      border-color: rgba(248, 113, 113, .24);
+    }
+
+    .orders-runtime-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .orders-runtime-metric {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(23, 32, 54, .78);
+      border: 1px solid rgba(36, 51, 80, .65);
+    }
+
+    .orders-runtime-metric .label {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .orders-runtime-metric .value {
+      margin-top: 4px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .orders-toolbar {
+      padding: 14px 18px;
+      border-bottom: 1px solid rgba(36, 51, 80, .5);
+      display: grid;
+      gap: 12px;
+    }
+
+    .orders-filter-group {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .orders-filter-group .btn {
+      padding-inline: 12px;
+    }
+
+    .orders-search-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    #orders-search {
+      flex: 1;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 9px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-family: inherit;
+      transition: all .15s;
+    }
+
+    #orders-search:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(240, 192, 32, .12);
+    }
+
+    .orders-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 18px 22px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .orders-empty {
+      margin-top: 36px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .order-card {
+      padding: 14px;
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(23, 32, 54, .92), rgba(15, 22, 36, .95));
+      border: 1px solid rgba(36, 51, 80, .7);
+      box-shadow: 0 10px 22px rgba(0, 0, 0, .12);
+      animation: fadeIn .24s ease both;
+    }
+
+    .order-card-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .order-card-order-id {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent2);
+      letter-spacing: .2px;
+    }
+
+    .order-card-link-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .order-card-link-state.linked {
+      color: var(--success);
+      background: rgba(52, 211, 153, .12);
+      border: 1px solid rgba(52, 211, 153, .2);
+    }
+
+    .order-card-link-state.unlinked {
+      color: var(--pending);
+      background: rgba(251, 191, 36, .12);
+      border: 1px solid rgba(251, 191, 36, .18);
+    }
+
+    .order-card-title {
+      margin-top: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.5;
+      color: var(--text);
+    }
+
+    .order-card-meta,
+    .order-card-times {
+      margin-top: 10px;
+      display: grid;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text2);
+    }
+
+    .order-card-meta strong,
+    .order-card-times strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .order-meta-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .order-meta-row-main {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }
+
+    .order-meta-row-main span {
+      word-break: break-all;
+    }
+
+    .order-copy-btn {
+      flex-shrink: 0;
+      border: 1px solid rgba(240, 192, 32, .18);
+      background: rgba(240, 192, 32, .08);
+      color: var(--accent2);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all .15s;
+    }
+
+    .order-copy-btn:hover {
+      background: rgba(240, 192, 32, .14);
+      border-color: rgba(240, 192, 32, .3);
+      color: #fff0b3;
+    }
+
+    .order-card-actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .order-card-actions .btn {
+      padding-inline: 12px;
+    }
+
     /* ── Toast ── */
     #toast {
       position: fixed;
@@ -869,6 +1292,28 @@
       #search {
         max-width: 160px;
       }
+
+      .header-actions {
+        gap: 6px;
+      }
+
+      .orders-search-row {
+        flex-direction: column;
+      }
+
+      .orders-runtime-actions {
+        width: 100%;
+        margin-left: 0;
+        justify-content: flex-start;
+      }
+
+      #orders-drawer {
+        width: 100vw;
+      }
+
+      .orders-runtime-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -892,6 +1337,7 @@
         <span id="crawler-toggle-label">巡逻开启</span>
       </button>
       <span id="crawler-runtime" class="runtime-badge offline" title="油猴脚本 xm-crawl-toggle 的实际同步状态">油猴未同步</span>
+      <button class="btn" id="orders-btn" title="查看千牛订单">📦 订单</button>
       <button class="btn" id="queue-btn" title="查看待发队列">📤 待发队列</button>
       <button class="btn" id="refresh-btn">↻ 刷新</button>
       <span id="stats">—</span>
@@ -911,6 +1357,34 @@
   </div>
 
   <div id="toast"></div>
+  <div id="orders-overlay"></div>
+  <aside id="orders-drawer">
+    <div class="orders-drawer-header">
+      <div class="orders-drawer-title">
+        <span class="orders-drawer-icon">📦</span>
+        <div>
+          <div class="orders-drawer-name">千牛订单</div>
+          <div class="orders-drawer-subtitle">待发货订单聚合与会话关联</div>
+        </div>
+      </div>
+      <button class="orders-close-btn" id="orders-close-btn">✕</button>
+    </div>
+    <div class="orders-runtime" id="orders-runtime"></div>
+    <div class="orders-toolbar">
+      <div class="orders-filter-group" id="orders-filter-group">
+        <button class="btn active" data-linked="all">全部</button>
+        <button class="btn" data-linked="linked">已关联</button>
+        <button class="btn" data-linked="unlinked">未关联</button>
+      </div>
+      <div class="orders-search-row">
+        <input id="orders-search" type="text" placeholder="搜索订单号 / 买家 / 电话尾号 / 商品 ID" />
+        <button class="btn" id="orders-full-scan-btn">全量扫描</button>
+      </div>
+    </div>
+    <div class="orders-list" id="orders-list">
+      <div class="orders-empty">订单加载中…</div>
+    </div>
+  </aside>
 
   <script>
     const sidebar = document.getElementById('sidebar');
@@ -919,15 +1393,65 @@
     const statsEl = document.getElementById('stats');
     const refreshBtn = document.getElementById('refresh-btn');
     const queueBtn = document.getElementById('queue-btn');
+    const ordersBtn = document.getElementById('orders-btn');
     const aiToggleBtn = document.getElementById('ai-toggle');
     const aiToggleLabel = document.getElementById('ai-toggle-label');
     const crawlerToggleBtn = document.getElementById('crawler-toggle');
     const crawlerToggleLabel = document.getElementById('crawler-toggle-label');
     const crawlerRuntimeEl = document.getElementById('crawler-runtime');
+    const ordersOverlayEl = document.getElementById('orders-overlay');
+    const ordersDrawerEl = document.getElementById('orders-drawer');
+    const ordersRuntimeEl = document.getElementById('orders-runtime');
+    const ordersListEl = document.getElementById('orders-list');
+    const ordersSearchEl = document.getElementById('orders-search');
+    const ordersFilterGroupEl = document.getElementById('orders-filter-group');
+    const ordersFullScanBtn = document.getElementById('orders-full-scan-btn');
+    const ordersCloseBtn = document.getElementById('orders-close-btn');
+
+    /**
+     * 确保“立即同步”按钮始终存在，避免布局调整后因为静态 DOM 中缺少按钮而让主脚本启动时报错。
+     * @returns {HTMLButtonElement} 可复用的立即同步按钮节点。
+     */
+    function ensureOrdersSyncNowButton() {
+      const existingButton = document.getElementById('orders-sync-now-btn');
+      if (existingButton && existingButton.tagName === 'BUTTON') {
+        return existingButton;
+      }
+
+      const button = document.createElement('button');
+      button.className = 'btn';
+      button.id = 'orders-sync-now-btn';
+      button.type = 'button';
+      button.textContent = '立即同步';
+      return button;
+    }
+
+    const ordersSyncNowBtn = ensureOrdersSyncNowButton();
 
     let sessions = [];
     let activeKey = null;
     let outgoingCache = {};
+    let ordersCache = [];
+    let ordersDataSignature = '';
+    let ordersRenderSignature = '';
+    let ordersRuntimeSignature = '';
+    let ordersSearchTimer = null;
+    let ordersRequestSeq = 0;
+    let qianniuRuntime = {
+      isOnline: false,
+      pageUrl: '',
+      visibleOrderCount: 0,
+      scanState: 'idle',
+      lastHeartbeatAt: 0,
+      lastSyncAt: 0,
+      lastSyncStats: {},
+      syncNowNonce: null,
+      syncNowRequestedNonce: null,
+      syncNowHandledNonce: null,
+      fullScanNonce: null,
+      fullScanRequestedNonce: null,
+      fullScanHandledNonce: null,
+    };
     let appSettings = {
       autoReplyEnabled: true,
       crawlerDesiredEnabled: true,
@@ -936,6 +1460,8 @@
     };
     let chatCache = {};
     let isPollingDashboard = false;
+    let activeOrdersFilter = 'all';
+    let isOrdersLoading = false;
 
     // ── Fetch helpers ──────────────────────────────────────────────────────────
 
@@ -1047,6 +1573,379 @@
     }
 
     /**
+     * 返回当前订单抽屉是否处于打开状态。
+     * @returns {boolean} 订单抽屉是否已打开。
+     */
+    function isOrdersDrawerOpen() {
+      return ordersDrawerEl.classList.contains('show');
+    }
+
+    /**
+     * 根据千牛运行态生成状态标签与样式。
+     * @returns {{className: string, text: string}} 当前运行态标签。
+     */
+    function getQianniuRuntimeStatus() {
+      if (qianniuRuntime.scanState === 'scanning') {
+        return { className: 'scanning', text: '全量扫描中' };
+      }
+      if (qianniuRuntime.isOnline) {
+        return { className: 'online', text: '脚本在线' };
+      }
+      return { className: 'offline', text: '脚本离线' };
+    }
+
+    /**
+     * 渲染订单抽屉顶部的脚本运行态卡片。
+     */
+    function renderOrdersRuntime() {
+      const nextRuntimeSignature = JSON.stringify({
+        isOnline: !!qianniuRuntime.isOnline,
+        pageUrl: qianniuRuntime.pageUrl || '',
+        visibleOrderCount: qianniuRuntime.visibleOrderCount || 0,
+        scanState: qianniuRuntime.scanState || 'idle',
+        syncNowNonce: qianniuRuntime.syncNowNonce || '',
+        fullScanNonce: qianniuRuntime.fullScanNonce || '',
+        lastSyncStats: {
+          inserted: qianniuRuntime.lastSyncStats?.inserted || 0,
+          updated: qianniuRuntime.lastSyncStats?.updated || 0,
+          matched: qianniuRuntime.lastSyncStats?.matched || 0,
+          unmatched: qianniuRuntime.lastSyncStats?.unmatched || 0,
+        }
+      });
+      if (ordersRuntimeSignature === nextRuntimeSignature) {
+        return;
+      }
+      ordersRuntimeSignature = nextRuntimeSignature;
+
+      const status = getQianniuRuntimeStatus();
+      const stats = qianniuRuntime.lastSyncStats || {};
+      const syncedAtText = qianniuRuntime.lastSyncAt ? formatDateTime(qianniuRuntime.lastSyncAt) : '尚未同步';
+      const pageText = qianniuRuntime.pageUrl ? '已打开 batch-consign 页面' : '尚未检测到千牛页面';
+
+      ordersRuntimeEl.innerHTML = `
+        <div class="orders-runtime-top">
+          <div class="orders-runtime-heading">
+            <span class="orders-runtime-status ${status.className}">${status.text}</span>
+            <span class="orders-runtime-page">${pageText}</span>
+          </div>
+          <div class="orders-runtime-actions"></div>
+        </div>
+        <div class="orders-runtime-grid">
+          <div class="orders-runtime-metric">
+            <div class="label">当前页订单</div>
+            <div class="value">${qianniuRuntime.visibleOrderCount || 0}</div>
+          </div>
+          <div class="orders-runtime-metric">
+            <div class="label">最近同步</div>
+            <div class="value">${syncedAtText}</div>
+          </div>
+          <div class="orders-runtime-metric">
+            <div class="label">最近写库</div>
+            <div class="value">${(stats.inserted || 0) + (stats.updated || 0)} 条</div>
+          </div>
+          <div class="orders-runtime-metric">
+            <div class="label">关联结果</div>
+            <div class="value">${stats.matched || 0} 已关联 / ${stats.unmatched || 0} 未关联</div>
+          </div>
+        </div>
+      `;
+
+      const runtimeActionsEl = ordersRuntimeEl.querySelector('.orders-runtime-actions');
+      if (runtimeActionsEl) {
+        runtimeActionsEl.appendChild(ordersSyncNowBtn);
+      }
+
+      const syncNowPending = !!qianniuRuntime.syncNowNonce;
+      ordersSyncNowBtn.disabled = !qianniuRuntime.isOnline || qianniuRuntime.scanState === 'scanning' || syncNowPending;
+      ordersSyncNowBtn.textContent = syncNowPending ? '同步中…' : '立即同步';
+      ordersFullScanBtn.disabled = qianniuRuntime.scanState === 'scanning';
+      ordersFullScanBtn.textContent = qianniuRuntime.scanState === 'scanning' ? '扫描中…' : '全量扫描';
+    }
+
+    /**
+     * 将订单运行态从后端拉回本地，并刷新抽屉头部。
+     * @param {boolean} silent - 是否静默失败。
+     */
+    async function loadQianniuRuntime(silent = false) {
+      try {
+        qianniuRuntime = await j('/api/orders/runtime');
+        renderOrdersRuntime();
+      } catch (e) {
+        if (!silent) toast('❌ ' + e.message, 'error');
+      }
+    }
+
+    /**
+     * 根据当前筛选条件拼装订单查询参数。
+     * @param {{ chatKey?: string | null }} options - 查询选项。
+     * @returns {string} 可直接拼接到 URL 的查询串。
+     */
+    function buildOrderQueryString({ chatKey = null } = {}) {
+      const params = new URLSearchParams();
+      params.set('linked', activeOrdersFilter);
+      params.set('limit', chatKey ? '20' : '200');
+      const query = ordersSearchEl.value.trim();
+      if (query) params.set('q', query);
+      if (chatKey) params.set('chatKey', chatKey);
+      return params.toString();
+    }
+
+    /**
+     * 为当前订单列表构建轻量签名，用于避免轮询时重复重绘相同内容。
+     * @param {any[]} orders - 当前订单列表。
+     * @returns {string} 列表签名。
+     */
+    function buildOrdersDataSignature(orders) {
+      return JSON.stringify((orders || []).map(order => ([
+        order.order_id || '',
+        order.chat_key || '',
+        order.buyer_name || '',
+        order.buyer_user_id || '',
+        order.product_id || '',
+        order.product_title || '',
+        order.product_price || '',
+        order.purchase_quantity || 0,
+        order.receiver_name || '',
+        order.receiver_phone || '',
+        order.receiver_address || '',
+        order.order_status_text || '',
+        order.paid_at || 0,
+        order.latest_ship_at || 0,
+      ])));
+    }
+
+    /**
+     * 为可复制字段生成统一的订单信息行。
+     * @param {string} label - 字段标签。
+     * @param {string} value - 字段值。
+     * @param {{ copyable?: boolean, copyLabel?: string }} options - 行渲染选项。
+     * @returns {string} 信息行 HTML。
+     */
+    function buildOrderMetaRow(label, value, { copyable = false, copyLabel = '' } = {}) {
+      const normalizedValue = String(value || '').trim();
+      return `<div class="order-meta-row">
+        <div class="order-meta-row-main">
+          <strong>${esc(label)}</strong>
+          <span>${esc(normalizedValue || '未识别')}</span>
+        </div>
+        ${copyable && normalizedValue
+          ? `<button class="order-copy-btn" data-copy-value="${esc(normalizedValue)}" data-copy-label="${esc(copyLabel || label)}">复制</button>`
+          : ''}
+      </div>`;
+    }
+
+    /**
+     * 将文本写入剪贴板；优先使用 Clipboard API，失败时回退到 textarea 方案。
+     * @param {string} value - 待复制文本。
+     * @param {string} label - 复制成功提示里的字段标签。
+     */
+    async function copyText(value, label) {
+      const normalizedValue = String(value || '').trim();
+      if (!normalizedValue) {
+        toast(`⚠️ ${label || '内容'}为空`, 'error');
+        return;
+      }
+
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(normalizedValue);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = normalizedValue;
+          textarea.setAttribute('readonly', 'readonly');
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          textarea.remove();
+        }
+        toast(`📋 已复制${label || '内容'}`, 'success');
+      } catch (error) {
+        toast(`❌ ${label || '内容'}复制失败`, 'error');
+      }
+    }
+
+    /**
+     * 为订单抽屉里新渲染出来的按钮补齐跳转与复制事件。
+     */
+    function bindOrderCardActions() {
+      ordersListEl.querySelectorAll('[data-chat-key]').forEach(button => {
+        button.addEventListener('click', () => {
+          closeOrdersDrawer();
+          loadChat(button.dataset.chatKey);
+        });
+      });
+
+      ordersListEl.querySelectorAll('[data-copy-value]').forEach(button => {
+        button.addEventListener('click', () => {
+          copyText(button.dataset.copyValue || '', button.dataset.copyLabel || '内容');
+        });
+      });
+    }
+
+    /**
+     * 将订单列表渲染到右侧抽屉中，支持跳转到已关联会话与字段复制。
+     * @param {boolean} force - 是否强制重绘。
+     */
+    function renderOrdersList(force = false) {
+      const showLoadingState = isOrdersLoading && !ordersCache.length;
+      const nextRenderSignature = `${showLoadingState ? 'loading' : 'ready'}|${ordersDataSignature}|${ordersCache.length}`;
+      if (!force && ordersRenderSignature === nextRenderSignature) {
+        return;
+      }
+      ordersRenderSignature = nextRenderSignature;
+
+      if (showLoadingState) {
+        ordersListEl.innerHTML = '<div class="orders-empty">订单加载中…</div>';
+        return;
+      }
+
+      if (!ordersCache.length) {
+        ordersListEl.innerHTML = '<div class="orders-empty">当前筛选条件下没有订单</div>';
+        return;
+      }
+
+      ordersListEl.innerHTML = ordersCache.map(order => {
+        const linked = !!order.chat_key;
+        const paidAtText = order.paid_at ? formatDateTime(order.paid_at) : '未识别';
+        const latestShipAtText = order.latest_ship_at ? formatDateTime(order.latest_ship_at) : '未识别';
+        const lastSeenText = order.last_seen_at ? formatDateTime(order.last_seen_at) : '未记录';
+        const buyerText = [order.buyer_name || '未识别', order.buyer_user_id ? `UID ${order.buyer_user_id}` : '']
+          .filter(Boolean)
+          .join(' · ');
+        const priceQuantityText = [
+          order.product_price || '',
+          order.purchase_quantity ? `x${order.purchase_quantity}` : ''
+        ].filter(Boolean).join(' ');
+
+        return `<div class="order-card">
+          <div class="order-card-header">
+            <div class="order-card-order-id">订单号 ${esc(order.order_id)}</div>
+            <span class="order-card-link-state ${linked ? 'linked' : 'unlinked'}">${linked ? '已关联会话' : '未关联会话'}</span>
+          </div>
+          <div class="order-card-title">${esc(order.product_title || '未识别商品标题')}</div>
+          <div class="order-card-meta">
+            ${buildOrderMetaRow('买家', buyerText)}
+            ${buildOrderMetaRow('收件人', order.receiver_name || '', { copyable: true, copyLabel: '收件人' })}
+            ${buildOrderMetaRow('手机号', order.receiver_phone || '', { copyable: true, copyLabel: '手机号' })}
+            ${buildOrderMetaRow('地址', order.receiver_address || '', { copyable: true, copyLabel: '地址' })}
+            ${buildOrderMetaRow('商品ID', order.product_id || '')}
+            ${buildOrderMetaRow('金额 / 数量', priceQuantityText)}
+          </div>
+          <div class="order-card-times">
+            <div><strong>订单状态</strong> ${esc(order.order_status_text || '状态未知')}</div>
+            <div><strong>支付时间</strong> ${esc(paidAtText)}</div>
+            <div><strong>最晚发货</strong> ${esc(latestShipAtText)}</div>
+            <div><strong>最近看到</strong> ${esc(lastSeenText)}</div>
+          </div>
+          <div class="order-card-actions">
+            ${linked ? `<button class="btn" data-chat-key="${esc(order.chat_key)}">跳转会话</button>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+      bindOrderCardActions();
+    }
+
+    /**
+     * 拉取订单列表，并按当前抽屉筛选条件刷新内容。
+     * @param {boolean} silent - 是否静默失败。
+     */
+    async function loadOrders(silent = false) {
+      const requestSeq = ++ordersRequestSeq;
+      const shouldShowLoading = !silent && !ordersCache.length;
+      isOrdersLoading = true;
+      if (shouldShowLoading) {
+        renderOrdersList(true);
+      }
+
+      try {
+        const query = buildOrderQueryString();
+        const nextOrders = await j(`/api/orders?${query}`);
+        if (requestSeq !== ordersRequestSeq) return;
+
+        const nextSignature = buildOrdersDataSignature(nextOrders);
+        const shouldRender = shouldShowLoading || nextSignature !== ordersDataSignature;
+        ordersCache = nextOrders;
+        ordersDataSignature = nextSignature;
+        isOrdersLoading = false;
+
+        if (shouldRender) {
+          renderOrdersList(true);
+        }
+      } catch (e) {
+        if (requestSeq !== ordersRequestSeq) return;
+        isOrdersLoading = false;
+        if (!silent) toast('❌ ' + e.message, 'error');
+        if (!ordersCache.length) {
+          ordersDataSignature = '';
+          renderOrdersList(true);
+        }
+      }
+    }
+
+    /**
+     * 打开订单抽屉，并立即刷新一次运行态和订单列表。
+     */
+    function openOrdersDrawer() {
+      ordersOverlayEl.classList.add('show');
+      ordersDrawerEl.classList.add('show');
+      ordersBtn.classList.add('active');
+      loadQianniuRuntime(true);
+      loadOrders(false);
+    }
+
+    /**
+     * 关闭订单抽屉。
+     */
+    function closeOrdersDrawer() {
+      ordersOverlayEl.classList.remove('show');
+      ordersDrawerEl.classList.remove('show');
+      ordersBtn.classList.remove('active');
+    }
+
+    /**
+     * 向后端发起一次新的全量扫描请求。
+     */
+    async function requestOrdersFullScan() {
+      ordersFullScanBtn.disabled = true;
+      try {
+        const result = await j('/api/orders/full-scan', { method: 'POST' });
+        qianniuRuntime = result.runtime || qianniuRuntime;
+        renderOrdersRuntime();
+        toast('📦 已下发千牛全量扫描请求');
+      } catch (e) {
+        toast('❌ ' + e.message, 'error');
+      } finally {
+        ordersFullScanBtn.disabled = false;
+      }
+    }
+
+    /**
+     * 向后端发起一次新的当前页立即同步请求。
+     */
+    async function requestOrdersSyncNow() {
+      if (!qianniuRuntime.isOnline) {
+        toast('⚠️ 当前未检测到千牛脚本在线', 'error');
+        return;
+      }
+
+      ordersSyncNowBtn.disabled = true;
+      try {
+        const result = await j('/api/orders/sync-now', { method: 'POST' });
+        qianniuRuntime = result.runtime || qianniuRuntime;
+        renderOrdersRuntime();
+        toast('📦 已下发千牛当前页立即同步请求');
+      } catch (e) {
+        toast('❌ ' + e.message, 'error');
+      } finally {
+        if (!qianniuRuntime.syncNowNonce) {
+          ordersSyncNowBtn.disabled = false;
+        }
+      }
+    }
+
+    /**
      * 切换 AI 自动回复状态，并持久化到后端设置表。
      */
     async function toggleAutoReply() {
@@ -1108,30 +2007,42 @@
      * @param {any} session - 当前会话元数据。
      * @param {any[]} messages - 当前消息列表。
      * @param {any[]} outgoing - 当前待发消息列表。
+     * @param {any[]} linkedOrders - 当前会话关联的订单列表。
      * @returns {string} 可比较的签名串。
      */
-    function buildChatSignature(session, messages, outgoing) {
+    function buildChatSignature(session, messages, outgoing, linkedOrders) {
       return JSON.stringify({
         chatKey: session?.chat_key || '',
         productJson: session?.product_json || '',
-        updatedAt: session?.updated_at || 0,
         autoReplyEnabled: !!appSettings.autoReplyEnabled,
         messages: (messages || []).map(m => [m.seq ?? 0, m.content || '', !!m.is_me]),
-        outgoing: (outgoing || []).map(o => [o.id, o.status, o.content || '', o.source || 'ai', o.sent_at || 0, o.created_at || 0])
+        outgoing: (outgoing || []).map(o => [o.id, o.status, o.content || '', o.source || 'ai', o.sent_at || 0, o.created_at || 0]),
+        linkedOrders: (linkedOrders || []).map(o => [
+          o.order_id || '',
+          o.chat_key || '',
+          o.product_id || '',
+          o.product_title || '',
+          o.product_price || '',
+          o.purchase_quantity || 0,
+          o.order_status_text || '',
+          o.paid_at || 0,
+          o.latest_ship_at || 0,
+        ]),
       });
     }
 
     /**
      * 读取指定会话的最新详情，并落到本地缓存。
      * @param {string} chatKey - 会话键。
-     * @returns {Promise<{session: any, messages: any[], outgoing: any[], signature: string}>} 最新聊天快照。
+     * @returns {Promise<{session: any, messages: any[], outgoing: any[], linkedOrders: any[], signature: string}>} 最新聊天快照。
      */
     async function fetchChatSnapshot(chatKey) {
       const { session, messages } = await j(`/api/sessions/${encodeURIComponent(chatKey)}/messages`);
       const outgoing = await j(`/api/outgoing-messages?chatKey=${encodeURIComponent(chatKey)}`);
+      const linkedOrders = await j(`/api/orders?chatKey=${encodeURIComponent(chatKey)}&linked=linked&limit=20`);
       outgoingCache[chatKey] = outgoing;
-      const signature = buildChatSignature(session, messages, outgoing);
-      const snapshot = { session, messages, outgoing, signature };
+      const signature = buildChatSignature(session, messages, outgoing, linkedOrders);
+      const snapshot = { session, messages, outgoing, linkedOrders, signature };
       chatCache[chatKey] = snapshot;
       return snapshot;
     }
@@ -1148,7 +2059,7 @@
       renderActive();
       const cached = chatCache[chatKey];
       if (cached && !forceRefresh) {
-        renderChat(cached.session, cached.messages, cached.outgoing, {
+        renderChat(cached.session, cached.messages, cached.outgoing, cached.linkedOrders, {
           animateMessages: false,
           uiState: preservedUiState
         });
@@ -1160,7 +2071,7 @@
         if (activeKey !== chatKey) return;
         const shouldRender = !cached || cached.signature !== snapshot.signature || forceRefresh || previousActiveKey !== chatKey;
         if (shouldRender) {
-          renderChat(snapshot.session, snapshot.messages, snapshot.outgoing, {
+          renderChat(snapshot.session, snapshot.messages, snapshot.outgoing, snapshot.linkedOrders, {
             animateMessages: false,
             uiState: preservedUiState
           });
@@ -1398,7 +2309,7 @@
         const snapshot = await fetchChatSnapshot(chatKey);
         if (activeKey !== chatKey) return;
         if (!previousSnapshot || previousSignature !== snapshot.signature) {
-          renderChat(snapshot.session, snapshot.messages, snapshot.outgoing, {
+          renderChat(snapshot.session, snapshot.messages, snapshot.outgoing, snapshot.linkedOrders, {
             animateMessages: false,
             uiState: preservedUiState
           });
@@ -1416,7 +2327,11 @@
       isPollingDashboard = true;
       try {
         await loadSettings(true);
+        await loadQianniuRuntime(true);
         await loadSessions();
+        if (isOrdersDrawerOpen()) {
+          await loadOrders(true);
+        }
         await refreshActiveChat();
       } finally {
         isPollingDashboard = false;
@@ -1424,15 +2339,50 @@
     }
 
     /**
+     * 为右侧聊天头部构建紧凑订单摘要卡片。
+     * @param {any[]} linkedOrders - 与当前会话匹配的订单列表。
+     * @returns {string} 订单摘要 HTML。
+     */
+    function buildChatOrderSummaryHtml(linkedOrders) {
+      if (!linkedOrders || !linkedOrders.length) {
+        return '';
+      }
+
+      return `<div class="chat-order-stack">${linkedOrders.map(order => {
+        const priceQuantityText = [
+          order.product_price || '',
+          order.purchase_quantity ? `x${order.purchase_quantity}` : ''
+        ].filter(Boolean).join(' ');
+        return `<div class="chat-order-card">
+          <div class="top">
+            <span class="oid">订单号 ${esc(order.order_id)}</span>
+            <span class="status">${esc(order.order_status_text || '待发货')}</span>
+            <span>支付 ${esc(order.paid_at ? formatDateTime(order.paid_at) : '未识别')}</span>
+            <span>最晚发货 ${esc(order.latest_ship_at ? formatDateTime(order.latest_ship_at) : '未识别')}</span>
+          </div>
+          <div class="title">${esc(order.product_title || '未识别商品标题')}</div>
+          <div class="meta">
+            <span>商品ID ${esc(order.product_id || '未识别')}</span>
+            <span>金额 ${esc(priceQuantityText || '未识别')}</span>
+            <span>买家 ${esc(order.buyer_name || '未识别')}</span>
+            <span>UID ${esc(order.buyer_user_id || '未识别')}</span>
+            <span>收件 ${esc(order.receiver_name || '未识别')}</span>
+            <span>地址 ${esc(order.receiver_address || '未识别')}</span>
+          </div>
+        </div>`;
+      }).join('')}</div>`;
+    }
+
+    /**
      * 渲染右侧聊天面板。
      * @param {any} session - 会话元数据。
      * @param {any[]} messages - 消息列表。
      * @param {any[]} outgoing - 待发消息列表。
+     * @param {any[]} linkedOrders - 当前会话关联的订单列表。
      * @param {{ animateMessages?: boolean, uiState?: ReturnType<typeof captureChatUiState> | null }} options - 渲染选项。
      */
-    function renderChat(session, messages, outgoing, { animateMessages = false, uiState = null } = {}) {
+    function renderChat(session, messages, outgoing, linkedOrders, { animateMessages = false, uiState = null } = {}) {
       const p = tryParse(session.product_json);
-      const meta = [p.price, p.location].filter(Boolean);
       const link = p.url
         ? `<a class="pl" href="${esc(p.url)}" target="_blank" title="${esc(p.url)}">🔗 商品链接</a>`
         : '';
@@ -1444,11 +2394,13 @@
       const pendingList = (outgoing || []).filter(o => o.status === 'pending' || o.status === 'sending');
       const pendingBadge = pendingList.length > 0
         ? `<span class="pending-count-badge" id="toggle-queue">⏳ ${pendingList.length} 条待发</span>` : '';
+      const orderSummaryHtml = buildChatOrderSummaryHtml(linkedOrders);
 
       const header = `<div id="chat-header">
       <div class="info">
         <div class="cn">${esc(session.customer_name)}</div>
         <div class="cm">${priceTag}${locTag}${link}${modeBadge}${pendingBadge}</div>
+        ${orderSummaryHtml}
       </div>
     </div>`;
 
@@ -1591,6 +2543,10 @@
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
     function tryParse(s) { try { return JSON.parse(s); } catch { return {}; } }
+    function formatDateTime(ts) {
+      if (!ts) return '';
+      return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+    }
     function timeAgo(ts) {
       if (!ts) return '';
       const diff = Math.floor(Date.now() / 1000) - ts;
@@ -1603,19 +2559,50 @@
     // ── Init ───────────────────────────────────────────────────────────────────
 
     searchEl.addEventListener('input', () => renderSidebar(filterSessions(searchEl.value)));
+    ordersSearchEl.addEventListener('input', () => {
+      window.clearTimeout(ordersSearchTimer);
+      ordersSearchTimer = window.setTimeout(() => {
+        loadOrders(false);
+      }, 180);
+    });
+    ordersBtn.addEventListener('click', () => {
+      if (isOrdersDrawerOpen()) {
+        closeOrdersDrawer();
+      } else {
+        openOrdersDrawer();
+      }
+    });
+    ordersOverlayEl.addEventListener('click', closeOrdersDrawer);
+    ordersCloseBtn.addEventListener('click', closeOrdersDrawer);
+    ordersFilterGroupEl.querySelectorAll('[data-linked]').forEach(button => {
+      button.addEventListener('click', () => {
+        activeOrdersFilter = button.dataset.linked || 'all';
+        ordersFilterGroupEl.querySelectorAll('[data-linked]').forEach(item => {
+          item.classList.toggle('active', item === button);
+        });
+        loadOrders(false);
+      });
+    });
+    ordersSyncNowBtn.addEventListener('click', requestOrdersSyncNow);
+    ordersFullScanBtn.addEventListener('click', requestOrdersFullScan);
     aiToggleBtn.addEventListener('click', toggleAutoReply);
     crawlerToggleBtn.addEventListener('click', toggleCrawler);
     refreshBtn.addEventListener('click', () => {
       loadSettings();
+      loadQianniuRuntime(true);
       loadSessions();
+      if (isOrdersDrawerOpen()) loadOrders(true);
       if (activeKey) loadChat(activeKey, { forceRefresh: true });
       toast('↻ 已刷新');
     });
 
     loadSettings();
+    loadQianniuRuntime(true);
     loadSessions();
     renderAiToggle();
     renderCrawlerToggle();
+    renderOrdersRuntime();
+    renderOrdersList();
     renderStats();
     setInterval(pollDashboard, 3000);
   </script>

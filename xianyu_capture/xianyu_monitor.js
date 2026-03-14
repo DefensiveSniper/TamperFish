@@ -432,7 +432,7 @@
      * 将旧的无 ID 副本会话合并到目标会话，并删除副本键。
      * @param {string} sourceKey - 待删除的副本键。
      * @param {string} targetKey - 最终保留的真实会话键。
-     * @param {{ customerName: string, productId: string|null, product: Record<string, any>, messages: {content: string, isMe: boolean}[] }} incomingChat - 本轮新提取的会话快照。
+     * @param {{ customerName: string, productId: string|null, buyerUserId?: string|null, product: Record<string, any>, messages: {content: string, isMe: boolean}[] }} incomingChat - 本轮新提取的会话快照。
      * @returns {boolean} 是否发生了合并。
      */
     function mergeDuplicateChatState(sourceKey, targetKey, incomingChat) {
@@ -445,6 +445,7 @@
             productId: incomingChat.productId || null,
             messages: [],
             product: {},
+            buyerUserId: incomingChat.buyerUserId || null,
             sessionId: incomingChat.sessionId || null,
             sessionInfo: incomingChat.sessionInfo || null
         };
@@ -460,6 +461,7 @@
             productId: incomingChat.productId || targetChat.productId || sourceChat.productId || null,
             messages: mergedMessages,
             product: mergeProductInfo(incomingChat.product, mergeProductInfo(targetChat.product, sourceChat.product)),
+            buyerUserId: incomingChat.buyerUserId || targetChat.buyerUserId || sourceChat.buyerUserId || null,
             sessionId: incomingChat.sessionId || targetChat.sessionId || sourceChat.sessionId || null,
             sessionInfo: incomingChat.sessionInfo || targetChat.sessionInfo || sourceChat.sessionInfo || null
         };
@@ -489,6 +491,7 @@
             if (mergeDuplicateChatState(chatKey, canonicalKey, {
                 customerName,
                 productId: state.chats[canonicalKey]?.productId || null,
+                buyerUserId: state.chats[canonicalKey]?.buyerUserId || chat.buyerUserId || null,
                 product: mergeProductInfo(state.chats[canonicalKey]?.product || {}, chat.product || {}),
                 messages: chat.messages || []
             })) {
@@ -501,7 +504,7 @@
     /**
      * 将当前提取结果写回到指定会话键，并返回是否有实际变化。
      * @param {string} chatKey - 目标会话键。
-     * @param {{ customerName: string, productId: string|null, product: Record<string, any>, messages: {content: string, isMe: boolean}[] }} incomingChat - 当前提取结果。
+     * @param {{ customerName: string, productId: string|null, buyerUserId?: string|null, product: Record<string, any>, messages: {content: string, isMe: boolean}[] }} incomingChat - 当前提取结果。
      * @returns {boolean} 是否更新了缓存内容。
      */
     function syncChatState(chatKey, incomingChat) {
@@ -512,6 +515,7 @@
                 productId: incomingChat.productId || null,
                 messages: incomingChat.messages || [],
                 product: mergeProductInfo(incomingChat.product, {}),
+                buyerUserId: incomingChat.buyerUserId || null,
                 sessionId: incomingChat.sessionId || null,
                 sessionInfo: incomingChat.sessionInfo || null
             };
@@ -531,6 +535,10 @@
         }
         if (incomingChat.customerName && existingChat.customerName !== incomingChat.customerName) {
             existingChat.customerName = incomingChat.customerName;
+            changed = true;
+        }
+        if (incomingChat.buyerUserId && existingChat.buyerUserId !== incomingChat.buyerUserId) {
+            existingChat.buyerUserId = incomingChat.buyerUserId;
             changed = true;
         }
         if (incomingChat.sessionId && existingChat.sessionId !== incomingChat.sessionId) {
@@ -1518,6 +1526,7 @@
             const chatKey = product.id
                 ? buildChatKey(customerName, product.id)
                 : (canonicalChatKey || buildChatKey(customerName, null));
+            const buyerUserId = activeEntry?.sessionInfo?.userInfo?.userId || product.userId || null;
             state.currentKey = chatKey;
             state.currentSessionId = activeEntry?.sessionId || null;
             state.currentSessionInfo = activeEntry?.sessionInfo || null;
@@ -1525,6 +1534,7 @@
             const incomingChat = {
                 customerName,
                 productId: product.id || null,
+                buyerUserId,
                 product,
                 messages,
                 sessionId: activeEntry?.sessionId || null,

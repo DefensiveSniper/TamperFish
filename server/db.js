@@ -44,6 +44,7 @@ async function initSchema(db) {
       product_json  TEXT NOT NULL DEFAULT '{}',
       session_id    TEXT,
       session_info_json TEXT NOT NULL DEFAULT '{}',
+      buyer_user_id TEXT,
       created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at    INTEGER NOT NULL DEFAULT (unixepoch())
     );
@@ -116,15 +117,26 @@ async function initSchema(db) {
     -- ── 千牛/发货预留表 (Reserved — not yet populated) ────────────────────────
     -- orders: synced from 千牛; linked to a session via chat_key
     CREATE TABLE IF NOT EXISTS orders (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      order_id    TEXT UNIQUE,
-      chat_key    TEXT REFERENCES sessions(chat_key),
-      buyer_name  TEXT,
-      product_id  TEXT,
-      status      TEXT NOT NULL DEFAULT 'pending',
-      raw_json    TEXT NOT NULL DEFAULT '{}',
-      created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id          TEXT UNIQUE,
+      chat_key          TEXT REFERENCES sessions(chat_key),
+      buyer_name        TEXT,
+      buyer_user_id     TEXT,
+      product_id        TEXT,
+      product_title     TEXT,
+      product_price     TEXT,
+      purchase_quantity INTEGER,
+      receiver_name     TEXT,
+      receiver_phone    TEXT,
+      receiver_address  TEXT,
+      order_status_text TEXT,
+      paid_at           INTEGER,
+      latest_ship_at    INTEGER,
+      last_seen_at      INTEGER,
+      status            TEXT NOT NULL DEFAULT 'pending',
+      raw_json          TEXT NOT NULL DEFAULT '{}',
+      created_at        INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at        INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
     -- shipments: one per order; tracking info from 千牛
@@ -147,6 +159,7 @@ async function migrateSchema(db) {
   const additions = [
     `ALTER TABLE sessions ADD COLUMN session_id TEXT`,
     `ALTER TABLE sessions ADD COLUMN session_info_json TEXT NOT NULL DEFAULT '{}'`,
+    `ALTER TABLE sessions ADD COLUMN buyer_user_id TEXT`,
     `ALTER TABLE outgoing_messages ADD COLUMN error TEXT`,
     `ALTER TABLE outgoing_messages ADD COLUMN retries INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE outgoing_messages ADD COLUMN last_attempt_at INTEGER`,
@@ -155,6 +168,17 @@ async function migrateSchema(db) {
     `ALTER TABLE outgoing_messages ADD COLUMN session_id TEXT`,
     `ALTER TABLE outgoing_messages ADD COLUMN claimed_at INTEGER`,
     `ALTER TABLE outgoing_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'`,
+    `ALTER TABLE orders ADD COLUMN buyer_user_id TEXT`,
+    `ALTER TABLE orders ADD COLUMN product_title TEXT`,
+    `ALTER TABLE orders ADD COLUMN product_price TEXT`,
+    `ALTER TABLE orders ADD COLUMN purchase_quantity INTEGER`,
+    `ALTER TABLE orders ADD COLUMN receiver_name TEXT`,
+    `ALTER TABLE orders ADD COLUMN receiver_phone TEXT`,
+    `ALTER TABLE orders ADD COLUMN receiver_address TEXT`,
+    `ALTER TABLE orders ADD COLUMN order_status_text TEXT`,
+    `ALTER TABLE orders ADD COLUMN paid_at INTEGER`,
+    `ALTER TABLE orders ADD COLUMN latest_ship_at INTEGER`,
+    `ALTER TABLE orders ADD COLUMN last_seen_at INTEGER`,
   ];
   for (const sql of additions) {
     try { await db.run(sql); } catch (_) { /* column already exists */ }
@@ -165,13 +189,26 @@ async function migrateSchema(db) {
      SET session_info_json = '{}'
      WHERE session_info_json IS NULL OR TRIM(session_info_json) = ''`
   );
+  await backfillSessionBuyerUserIds(db);
   await normalizeDuplicateSessionIds(db);
   await db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_session_id_unique
       ON sessions(session_id)
       WHERE session_id IS NOT NULL AND session_id != '';
+    CREATE INDEX IF NOT EXISTS idx_sessions_buyer_product
+      ON sessions(buyer_user_id, product_id)
+      WHERE buyer_user_id IS NOT NULL
+        AND TRIM(buyer_user_id) != ''
+        AND product_id IS NOT NULL
+        AND TRIM(product_id) != '';
     CREATE INDEX IF NOT EXISTS idx_outgoing_chat_status
       ON outgoing_messages(chat_key, status, id);
+    CREATE INDEX IF NOT EXISTS idx_orders_recent
+      ON orders(last_seen_at DESC, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_chat_key
+      ON orders(chat_key, last_seen_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_buyer_product
+      ON orders(buyer_user_id, product_id);
   `);
   await migrateOutgoingMessagesSchema(db);
 }
@@ -344,6 +381,69 @@ async function migrateOutgoingMessagesSchema(db) {
   }
 }
 
+/**
+ * 从会话载荷中提取买家 userId，优先读取显式字段，再回退到商品与会话元数据。
+ * @param {{
+ *   buyerUserId?: string | null,
+ *   product?: { userId?: string | null },
+ *   sessionInfo?: { userInfo?: { userId?: string | null } } | null
+ * }} session - 当前会话载荷。
+ * @returns {string | null} 归一化后的买家 userId。
+ */
+function extractBuyerUserIdFromSessionPayload(session = {}) {
+  const candidates = [
+    session.buyerUserId,
+    session.product?.userId,
+    session.sessionInfo?.userInfo?.userId,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = candidate == null ? '' : String(candidate).trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 尽力从历史 session 记录里回填 buyer_user_id，兼容旧版本只把 userId 塞进 JSON 的情况。
+ * @param {import('sqlite').Database} db - SQLite 连接。
+ * @returns {Promise<void>}
+ */
+async function backfillSessionBuyerUserIds(db) {
+  const rows = await db.all(
+    `SELECT chat_key, product_json, session_info_json
+     FROM sessions
+     WHERE buyer_user_id IS NULL OR TRIM(buyer_user_id) = ''`
+  );
+
+  for (const row of rows) {
+    let product = {};
+    let sessionInfo = {};
+    try { product = JSON.parse(row.product_json || '{}'); } catch (_) { /* ignore */ }
+    try { sessionInfo = JSON.parse(row.session_info_json || '{}'); } catch (_) { /* ignore */ }
+
+    const buyerUserId = extractBuyerUserIdFromSessionPayload({
+      product,
+      sessionInfo,
+    });
+    if (!buyerUserId) {
+      continue;
+    }
+
+    await db.run(
+      `UPDATE sessions
+       SET buyer_user_id = ?,
+           updated_at = unixepoch()
+       WHERE chat_key = ?`,
+      buyerUserId,
+      row.chat_key
+    );
+  }
+}
+
 // ── Hash helper ──────────────────────────────────────────────────────────────
 
 function msgHash(seq, content, isMe) {
@@ -432,6 +532,14 @@ async function cleanupDuplicateSessionKey(db, sourceChatKey, targetChatKey, cust
   }
 
   await db.run(
+    `UPDATE orders
+     SET chat_key = ?,
+         updated_at = unixepoch()
+     WHERE chat_key = ?`,
+    targetChatKey,
+    sourceChatKey
+  );
+  await db.run(
     `UPDATE outgoing_messages
      SET chat_key = ?,
          customer_name = COALESCE(customer_name, ?),
@@ -464,19 +572,60 @@ async function cleanupEmptySessionShell(db, chatKey) {
     `SELECT
        EXISTS(SELECT 1 FROM sessions WHERE chat_key = ?) AS has_session,
        EXISTS(SELECT 1 FROM messages WHERE chat_key = ?) AS has_messages,
-       EXISTS(SELECT 1 FROM outgoing_messages WHERE chat_key = ?) AS has_outgoing`,
+       EXISTS(SELECT 1 FROM outgoing_messages WHERE chat_key = ?) AS has_outgoing,
+       EXISTS(SELECT 1 FROM orders WHERE chat_key = ?) AS has_orders`,
+    chatKey,
     chatKey,
     chatKey,
     chatKey
   );
 
-  if (!stats?.has_session || stats.has_messages || stats.has_outgoing) {
+  if (!stats?.has_session || stats.has_messages || stats.has_outgoing || stats.has_orders) {
     return false;
   }
 
   await db.run(`DELETE FROM outbox WHERE chat_key = ?`, chatKey);
   await db.run(`DELETE FROM sessions WHERE chat_key = ?`, chatKey);
   return true;
+}
+
+/**
+ * 当闲鱼会话补齐 buyer_user_id 后，尽力把历史未关联订单回填到该会话。
+ * @param {import('sqlite').Database} db - SQLite 连接。
+ * @param {string} chatKey - 当前会话键。
+ * @param {string|null} buyerUserId - 买家 userId。
+ * @param {string|null} productId - 商品 ID。
+ * @returns {Promise<void>}
+ */
+async function reconcileOrdersForSession(db, chatKey, buyerUserId, productId) {
+  if (!chatKey || !buyerUserId || !productId) {
+    return;
+  }
+
+  const matches = await db.get(
+    `SELECT COUNT(*) AS cnt
+     FROM sessions
+     WHERE buyer_user_id = ?
+       AND product_id = ?`,
+    buyerUserId,
+    productId
+  );
+  if ((matches?.cnt || 0) !== 1) {
+    return;
+  }
+
+  await db.run(
+    `UPDATE orders
+     SET chat_key = ?,
+         updated_at = unixepoch()
+     WHERE buyer_user_id = ?
+       AND product_id = ?
+       AND (chat_key IS NULL OR chat_key != ?)`,
+    chatKey,
+    buyerUserId,
+    productId,
+    chatKey
+  );
 }
 
 // ── Ingest ───────────────────────────────────────────────────────────────────
@@ -500,6 +649,7 @@ async function ingest(sessions) {
       } = session;
       const effectiveCustomerName = customerName || chatKey.split('_')[0];
       const normalizedSessionId = sessionId ? String(sessionId) : null;
+      const buyerUserId = extractBuyerUserIdFromSessionPayload(session);
       const sessionInfoJson =
         sessionInfo && typeof sessionInfo === 'object'
           ? JSON.stringify(sessionInfo)
@@ -535,8 +685,8 @@ async function ingest(sessions) {
 
       // Upsert session; only overwrite product_json when new value is non-empty
       await db.run(`
-        INSERT INTO sessions(chat_key, customer_name, product_id, product_json, session_id, session_info_json)
-        VALUES(?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions(chat_key, customer_name, product_id, product_json, session_id, session_info_json, buyer_user_id)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(chat_key) DO UPDATE SET
           customer_name = excluded.customer_name,
           product_id    = CASE
@@ -555,8 +705,14 @@ async function ingest(sessions) {
             WHEN excluded.session_info_json != '{}' THEN excluded.session_info_json
             ELSE sessions.session_info_json
           END,
+          buyer_user_id = CASE
+            WHEN excluded.buyer_user_id IS NOT NULL AND excluded.buyer_user_id != '' THEN excluded.buyer_user_id
+            ELSE sessions.buyer_user_id
+          END,
           updated_at = unixepoch()
-      `, canonicalChatKey, effectiveCustomerName, productId, productJson, normalizedSessionId, sessionInfoJson);
+      `, canonicalChatKey, effectiveCustomerName, productId, productJson, normalizedSessionId, sessionInfoJson, buyerUserId);
+
+      await reconcileOrdersForSession(db, canonicalChatKey, buyerUserId, productId);
 
       await cleanupDuplicateSessionKey(
         db,
@@ -688,7 +844,7 @@ async function listSessions() {
   return db.all(`
     SELECT
       s.chat_key, s.customer_name, s.product_id, s.product_json,
-      s.session_id, s.session_info_json,
+      s.session_id, s.session_info_json, s.buyer_user_id,
       s.created_at, s.updated_at,
       COUNT(m.id) AS message_count,
       (SELECT content FROM messages WHERE chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_message,
@@ -733,6 +889,372 @@ async function getMessages(chatKey) {
     'SELECT seq, content, is_me, ingested_at FROM messages WHERE chat_key = ? ORDER BY seq ASC',
     chatKey
   );
+}
+
+/**
+ * 归一化任意可选文本字段，统一把空串收敛为 null。
+ * @param {any} value - 原始字段值。
+ * @returns {string | null} 去空白后的文本。
+ */
+function normalizeOptionalText(value) {
+  if (value == null) {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  return normalized ? normalized : null;
+}
+
+/**
+ * 将千牛页面上的本地时间文案解析成 Unix 秒级时间戳。
+ * @param {string | null | undefined} text - 页面上提取到的时间文案。
+ * @returns {number | null} 解析成功返回 Unix 时间戳，失败返回 null。
+ */
+function parseQianniuDateTimeToUnix(text) {
+  const normalized = normalizeOptionalText(text);
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(
+    /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/
+  );
+  if (!match) {
+    return null;
+  }
+
+  const [, year, month, day, hour, minute, second = '00'] = match;
+  const parsed = new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second)
+  );
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return Math.floor(parsed.getTime() / 1000);
+}
+
+/**
+ * 归一化千牛卡片里的金额文本，统一输出为带人民币符号的展示值。
+ * @param {string | null | undefined} text - 原始金额文本。
+ * @returns {string | null} 归一化后的金额文本。
+ */
+function normalizeQianniuPriceText(text) {
+  const normalized = normalizeOptionalText(text);
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(/([0-9]+(?:\.[0-9]{1,2})?)/);
+  if (!match) {
+    return null;
+  }
+
+  return `￥${match[1]}`;
+}
+
+/**
+ * 将购买数量字段归一化为正整数。
+ * @param {string | number | null | undefined} value - 原始数量值。
+ * @returns {number | null} 解析成功返回数量，否则返回 null。
+ */
+function parseQianniuQuantity(value) {
+  const normalized = normalizeOptionalText(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(/(\d+)/);
+  if (!match) {
+    return null;
+  }
+
+  const quantity = Number(match[1]);
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    return null;
+  }
+
+  return quantity;
+}
+
+/**
+ * 将对象安全序列化成 JSON，避免单条脏数据导致整批订单同步失败。
+ * @param {Record<string, any>} payload - 待序列化对象。
+ * @returns {string} 可落库的 JSON 字符串。
+ */
+function stringifyJsonSafely(payload) {
+  try {
+    return JSON.stringify(payload || {});
+  } catch (_) {
+    return '{}';
+  }
+}
+
+/**
+ * 根据 buyer_user_id + product_id 精准匹配唯一会话。
+ * @param {import('sqlite').Database} db - SQLite 连接。
+ * @param {string | null} buyerUserId - 买家 userId。
+ * @param {string | null} productId - 商品 ID。
+ * @returns {Promise<string | null>} 命中的唯一 chat_key；否则返回 null。
+ */
+async function resolveOrderChatKey(db, buyerUserId, productId) {
+  if (!buyerUserId || !productId) {
+    return null;
+  }
+
+  const matches = await db.all(
+    `SELECT chat_key
+     FROM sessions
+     WHERE buyer_user_id = ?
+       AND product_id = ?
+     ORDER BY updated_at DESC, chat_key ASC
+     LIMIT 2`,
+    buyerUserId,
+    productId
+  );
+  return matches.length === 1 ? matches[0].chat_key : null;
+}
+
+/**
+ * 批量写入千牛订单快照，并按 buyer_user_id + product_id 自动回填会话关联。
+ * @param {any[]} orders - 千牛脚本上传的订单列表。
+ * @param {{ mode?: string, pageNo?: number | null, scanNonce?: string | null, collectedAt?: string | number | null }} pageContext - 本次采集上下文。
+ * @returns {Promise<{inserted: number, updated: number, matched: number, unmatched: number, skipped: number, total: number}>} 本次同步统计。
+ */
+async function ingestOrders(orders = [], pageContext = {}) {
+  const db = await getDb();
+  const safeOrders = Array.isArray(orders) ? orders : [];
+  const stats = {
+    inserted: 0,
+    updated: 0,
+    matched: 0,
+    unmatched: 0,
+    skipped: 0,
+    total: safeOrders.length,
+  };
+  const nowTs = Math.floor(Date.now() / 1000);
+
+  await db.exec('BEGIN');
+  try {
+    for (const order of safeOrders) {
+      const orderId = normalizeOptionalText(order?.orderId);
+      if (!orderId) {
+        stats.skipped++;
+        continue;
+      }
+
+      const buyerName = normalizeOptionalText(order?.buyerName);
+      const buyerUserId = normalizeOptionalText(order?.buyerUserId);
+      const productId = normalizeOptionalText(order?.productId);
+      const productTitle = normalizeOptionalText(order?.productTitle);
+      const productPrice = normalizeQianniuPriceText(order?.productPrice);
+      const purchaseQuantity = parseQianniuQuantity(order?.purchaseQuantity);
+      const receiverName = normalizeOptionalText(order?.receiverName);
+      const receiverPhone = normalizeOptionalText(order?.receiverPhone);
+      const receiverAddress = normalizeOptionalText(order?.receiverAddress);
+      const orderStatusText = normalizeOptionalText(order?.orderStatusText);
+      const paidAt = parseQianniuDateTimeToUnix(order?.paidAtText);
+      const latestShipAt = parseQianniuDateTimeToUnix(order?.latestShipAtText);
+      const chatKey = await resolveOrderChatKey(db, buyerUserId, productId);
+      const rawJson = stringifyJsonSafely({
+        raw: order?.raw || null,
+        extracted: {
+          orderId,
+          buyerName,
+          buyerUserId,
+          productId,
+          productTitle,
+          productPrice,
+          purchaseQuantity,
+          receiverName,
+          receiverPhone,
+          receiverAddress,
+          orderStatusText,
+          paidAtText: normalizeOptionalText(order?.paidAtText),
+          latestShipAtText: normalizeOptionalText(order?.latestShipAtText),
+        },
+        pageContext: {
+          mode: normalizeOptionalText(pageContext?.mode) || 'current-page',
+          pageNo: pageContext?.pageNo ?? null,
+          scanNonce: normalizeOptionalText(pageContext?.scanNonce),
+          collectedAt: pageContext?.collectedAt ?? null,
+        },
+      });
+      const existing = await db.get(
+        `SELECT id
+         FROM orders
+         WHERE order_id = ?`,
+        orderId
+      );
+
+      await db.run(
+        `INSERT INTO orders(
+           order_id,
+           chat_key,
+           buyer_name,
+           buyer_user_id,
+           product_id,
+           product_title,
+           product_price,
+           purchase_quantity,
+           receiver_name,
+           receiver_phone,
+           receiver_address,
+           order_status_text,
+           paid_at,
+           latest_ship_at,
+           last_seen_at,
+           raw_json,
+           updated_at
+         )
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+         ON CONFLICT(order_id) DO UPDATE SET
+           chat_key = excluded.chat_key,
+           buyer_name = excluded.buyer_name,
+           buyer_user_id = excluded.buyer_user_id,
+           product_id = excluded.product_id,
+           product_title = excluded.product_title,
+           product_price = excluded.product_price,
+           purchase_quantity = excluded.purchase_quantity,
+           receiver_name = excluded.receiver_name,
+           receiver_phone = excluded.receiver_phone,
+           receiver_address = excluded.receiver_address,
+           order_status_text = excluded.order_status_text,
+           paid_at = excluded.paid_at,
+           latest_ship_at = excluded.latest_ship_at,
+           last_seen_at = excluded.last_seen_at,
+           raw_json = excluded.raw_json,
+           updated_at = unixepoch()`,
+        orderId,
+        chatKey,
+        buyerName,
+        buyerUserId,
+        productId,
+        productTitle,
+        productPrice,
+        purchaseQuantity,
+        receiverName,
+        receiverPhone,
+        receiverAddress,
+        orderStatusText,
+        paidAt,
+        latestShipAt,
+        nowTs,
+        rawJson
+      );
+
+      if (existing) {
+        stats.updated++;
+      } else {
+        stats.inserted++;
+      }
+
+      if (chatKey) {
+        stats.matched++;
+      } else {
+        stats.unmatched++;
+      }
+    }
+
+    await db.exec('COMMIT');
+  } catch (error) {
+    await db.exec('ROLLBACK');
+    throw error;
+  }
+
+  await setAppSetting('qianniu_last_sync_at', String(nowTs));
+  await setAppSetting(
+    'qianniu_last_sync_stats',
+    stringifyJsonSafely({
+      ...stats,
+      pageContext: {
+        mode: normalizeOptionalText(pageContext?.mode) || 'current-page',
+        pageNo: pageContext?.pageNo ?? null,
+        scanNonce: normalizeOptionalText(pageContext?.scanNonce),
+        collectedAt: pageContext?.collectedAt ?? null,
+      },
+    })
+  );
+
+  return stats;
+}
+
+/**
+ * 查询订单列表，支持按关联状态、会话键和关键字过滤。
+ * @param {{ linked?: string, q?: string, limit?: number, chatKey?: string | null }} options - 查询过滤条件。
+ * @returns {Promise<any[]>} 满足条件的订单列表。
+ */
+async function listOrders({ linked = 'all', q = '', limit = 200, chatKey = null } = {}) {
+  const db = await getDb();
+  const filters = [];
+  const params = [];
+  const normalizedLinked = ['all', 'linked', 'unlinked'].includes(linked) ? linked : 'all';
+  const normalizedQuery = normalizeOptionalText(q);
+  const normalizedChatKey = normalizeOptionalText(chatKey);
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 200, 500));
+
+  if (normalizedLinked === 'linked') {
+    filters.push(`o.chat_key IS NOT NULL AND TRIM(o.chat_key) != ''`);
+  } else if (normalizedLinked === 'unlinked') {
+    filters.push(`o.chat_key IS NULL OR TRIM(o.chat_key) = ''`);
+  }
+
+  if (normalizedChatKey) {
+    filters.push(`o.chat_key = ?`);
+    params.push(normalizedChatKey);
+  }
+
+  if (normalizedQuery) {
+    const likeQuery = `%${normalizedQuery}%`;
+    filters.push(`(
+      o.order_id LIKE ?
+      OR COALESCE(o.buyer_name, '') LIKE ?
+      OR COALESCE(o.buyer_user_id, '') LIKE ?
+      OR COALESCE(o.product_id, '') LIKE ?
+      OR COALESCE(o.product_title, '') LIKE ?
+      OR COALESCE(o.product_price, '') LIKE ?
+      OR COALESCE(o.receiver_name, '') LIKE ?
+      OR COALESCE(o.receiver_phone, '') LIKE ?
+      OR COALESCE(o.receiver_address, '') LIKE ?
+    )`);
+    params.push(
+      likeQuery,
+      likeQuery,
+      likeQuery,
+      likeQuery,
+      likeQuery,
+      likeQuery,
+      likeQuery,
+      likeQuery,
+      likeQuery
+    );
+  }
+
+  const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  return db.all(
+    `SELECT o.*
+     FROM orders o
+     ${whereSql}
+     ORDER BY COALESCE(o.last_seen_at, o.updated_at) DESC, o.order_id DESC
+     LIMIT ?`,
+    ...params,
+    safeLimit
+  );
+}
+
+/**
+ * 返回某个闲鱼会话已关联的订单列表。
+ * @param {string} chatKey - 会话键。
+ * @param {number} limit - 返回条数上限。
+ * @returns {Promise<any[]>} 与会话关联的订单列表。
+ */
+async function listOrdersByChatKey(chatKey, limit = 20) {
+  return listOrders({ chatKey, limit, linked: 'linked' });
 }
 
 // ── Outgoing messages ─────────────────────────────────────────────────────────
@@ -982,6 +1504,46 @@ async function ensureRuntimeSettings(defaults = {}) {
      VALUES('crawler_last_heartbeat_at', '0', unixepoch())
      ON CONFLICT(key) DO NOTHING`
   );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_last_heartbeat_at', '0', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_page_url', '', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_visible_order_count', '0', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_scan_state', 'idle', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_full_scan_requested_nonce', '', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_full_scan_handled_nonce', '', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_last_sync_at', '0', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('qianniu_last_sync_stats', '{}', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
 }
 
 /**
@@ -1059,12 +1621,159 @@ async function getRuntimeSettings() {
   };
 }
 
+/**
+ * 解析保存在 app_settings 中的 JSON 值；解析失败时返回兜底对象。
+ * @param {string | null} value - 原始 JSON 字符串。
+ * @param {Record<string, any>} fallback - 兜底值。
+ * @returns {Record<string, any>} 解析后的对象。
+ */
+function parseSettingsJson(value, fallback = {}) {
+  try {
+    const parsed = JSON.parse(value || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+/**
+ * 记录千牛油猴脚本的心跳与扫描状态，并返回当前最新运行态。
+ * @param {{
+ *   pageUrl?: string,
+ *   visibleOrderCount?: number,
+ *   scanState?: string,
+ *   scanNonceHandled?: string | null,
+ *   syncNonceHandled?: string | null
+ * }} runtimeState - 千牛脚本上报的运行态。
+ * @returns {Promise<ReturnType<typeof getQianniuRuntime>>} 最新千牛运行态。
+ */
+async function updateQianniuHeartbeat(runtimeState = {}) {
+  const pageUrl = normalizeOptionalText(runtimeState.pageUrl) || '';
+  const visibleOrderCount = Number.isFinite(Number(runtimeState.visibleOrderCount))
+    ? String(Math.max(0, Number(runtimeState.visibleOrderCount)))
+    : '0';
+  const scanState = runtimeState.scanState === 'scanning' ? 'scanning' : 'idle';
+  const scanNonceHandled = normalizeOptionalText(runtimeState.scanNonceHandled) || '';
+  const syncNonceHandled = normalizeOptionalText(runtimeState.syncNonceHandled) || '';
+
+  await setAppSetting('qianniu_page_url', pageUrl);
+  await setAppSetting('qianniu_visible_order_count', visibleOrderCount);
+  await setAppSetting('qianniu_scan_state', scanState);
+  await setAppSetting('qianniu_last_heartbeat_at', String(Math.floor(Date.now() / 1000)));
+  if (scanNonceHandled) {
+    await setAppSetting('qianniu_full_scan_handled_nonce', scanNonceHandled);
+  }
+  if (syncNonceHandled) {
+    await setAppSetting('qianniu_sync_now_handled_nonce', syncNonceHandled);
+  }
+
+  return getQianniuRuntime();
+}
+
+/**
+ * 为千牛脚本生成一次新的当前页立即同步请求。
+ * @returns {Promise<{requestedNonce: string, runtime: Awaited<ReturnType<typeof getQianniuRuntime>>}>} 新请求 nonce 与最新运行态。
+ */
+async function requestQianniuSyncNow() {
+  const requestedNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await setAppSetting('qianniu_sync_now_requested_nonce', requestedNonce);
+  return {
+    requestedNonce,
+    runtime: await getQianniuRuntime(),
+  };
+}
+
+/**
+ * 为千牛脚本生成一次新的手动全量扫描请求。
+ * @returns {Promise<{requestedNonce: string, runtime: Awaited<ReturnType<typeof getQianniuRuntime>>}>} 新请求 nonce 与最新运行态。
+ */
+async function requestQianniuFullScan() {
+  const requestedNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await setAppSetting('qianniu_full_scan_requested_nonce', requestedNonce);
+  return {
+    requestedNonce,
+    runtime: await getQianniuRuntime(),
+  };
+}
+
+/**
+ * 读取千牛订单采集脚本的运行态与最近一次同步统计。
+ * @returns {Promise<{
+ *   isOnline: boolean,
+ *   pageUrl: string,
+ *   visibleOrderCount: number,
+ *   scanState: 'idle' | 'scanning',
+ *   lastHeartbeatAt: number,
+ *   lastSyncAt: number,
+ *   lastSyncStats: Record<string, any>,
+ *   syncNowNonce: string | null,
+ *   syncNowRequestedNonce: string | null,
+ *   syncNowHandledNonce: string | null,
+ *   fullScanNonce: string | null,
+ *   fullScanRequestedNonce: string | null,
+ *   fullScanHandledNonce: string | null
+ * }>} 千牛运行态摘要。
+ */
+async function getQianniuRuntime() {
+  const [
+    pageUrl,
+    visibleOrderCount,
+    scanState,
+    lastHeartbeatAt,
+    lastSyncAt,
+    lastSyncStats,
+    syncNowRequestedNonce,
+    syncNowHandledNonce,
+    fullScanRequestedNonce,
+    fullScanHandledNonce,
+  ] = await Promise.all([
+    getAppSetting('qianniu_page_url', ''),
+    getAppSetting('qianniu_visible_order_count', '0'),
+    getAppSetting('qianniu_scan_state', 'idle'),
+    getAppSetting('qianniu_last_heartbeat_at', '0'),
+    getAppSetting('qianniu_last_sync_at', '0'),
+    getAppSetting('qianniu_last_sync_stats', '{}'),
+    getAppSetting('qianniu_sync_now_requested_nonce', ''),
+    getAppSetting('qianniu_sync_now_handled_nonce', ''),
+    getAppSetting('qianniu_full_scan_requested_nonce', ''),
+    getAppSetting('qianniu_full_scan_handled_nonce', ''),
+  ]);
+
+  const heartbeatTs = Number(lastHeartbeatAt || 0);
+  const requestedSyncNowNonce = normalizeOptionalText(syncNowRequestedNonce);
+  const handledSyncNowNonce = normalizeOptionalText(syncNowHandledNonce);
+  const requestedNonce = normalizeOptionalText(fullScanRequestedNonce);
+  const handledNonce = normalizeOptionalText(fullScanHandledNonce);
+
+  return {
+    isOnline: heartbeatTs > 0 && (Math.floor(Date.now() / 1000) - heartbeatTs) <= 12,
+    pageUrl: pageUrl || '',
+    visibleOrderCount: Number(visibleOrderCount || 0),
+    scanState: scanState === 'scanning' ? 'scanning' : 'idle',
+    lastHeartbeatAt: heartbeatTs,
+    lastSyncAt: Number(lastSyncAt || 0),
+    lastSyncStats: parseSettingsJson(lastSyncStats, {}),
+    syncNowNonce:
+      requestedSyncNowNonce && requestedSyncNowNonce !== handledSyncNowNonce
+        ? requestedSyncNowNonce
+        : null,
+    syncNowRequestedNonce: requestedSyncNowNonce,
+    syncNowHandledNonce: handledSyncNowNonce,
+    fullScanNonce: requestedNonce && requestedNonce !== handledNonce ? requestedNonce : null,
+    fullScanRequestedNonce: requestedNonce,
+    fullScanHandledNonce: handledNonce,
+  };
+}
+
 module.exports = {
   ingest,
   listSessions,
   getSession,
   getSessionBySessionId,
   getMessages,
+  ingestOrders,
+  listOrders,
+  listOrdersByChatKey,
   addOutgoingMessage,
   listOutgoingMessages,
   updateOutgoingStatus,
@@ -1081,5 +1790,9 @@ module.exports = {
   isCrawlerDesiredEnabled,
   setCrawlerDesiredEnabled,
   updateCrawlerHeartbeat,
+  updateQianniuHeartbeat,
+  requestQianniuSyncNow,
+  requestQianniuFullScan,
+  getQianniuRuntime,
 
 };

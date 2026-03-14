@@ -117,6 +117,61 @@ app.patch('/api/settings', async (req, res) => {
   }
 });
 
+// ── GET /api/orders ───────────────────────────────────────────────────────────
+
+app.get('/api/orders', async (req, res) => {
+  try {
+    res.json(await db.listOrders({
+      linked: req.query.linked,
+      q: req.query.q,
+      limit: req.query.limit,
+      chatKey: req.query.chatKey,
+    }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/orders/runtime ───────────────────────────────────────────────────
+
+app.get('/api/orders/runtime', async (_req, res) => {
+  try {
+    res.json(await db.getQianniuRuntime());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/orders/full-scan ────────────────────────────────────────────────
+
+app.post('/api/orders/full-scan', async (_req, res) => {
+  try {
+    const result = await db.requestQianniuFullScan();
+    res.status(202).json({
+      ok: true,
+      requestedNonce: result.requestedNonce,
+      runtime: result.runtime,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/orders/sync-now ────────────────────────────────────────────────
+
+app.post('/api/orders/sync-now', async (_req, res) => {
+  try {
+    const result = await db.requestQianniuSyncNow();
+    res.status(202).json({
+      ok: true,
+      requestedNonce: result.requestedNonce,
+      runtime: result.runtime,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /api/browser/heartbeat ──────────────────────────────────────────────
 
 app.post('/api/browser/heartbeat', async (req, res) => {
@@ -322,6 +377,36 @@ async function handleBrowserRpcAction(action, payload = {}) {
 
       await db.updateCrawlerHeartbeat({ crawlerEnabled });
       return await db.getRuntimeSettings();
+    }
+
+    case 'orders.heartbeat': {
+      const {
+        pageUrl = '',
+        visibleOrderCount = 0,
+        scanState = 'idle',
+        scanNonceHandled = null,
+        syncNonceHandled = null,
+      } = payload || {};
+      const runtime = await db.updateQianniuHeartbeat({
+        pageUrl,
+        visibleOrderCount,
+        scanState,
+        scanNonceHandled,
+        syncNonceHandled,
+      });
+      return {
+        syncNowNonce: runtime.syncNowNonce,
+        fullScanNonce: runtime.fullScanNonce,
+        runtime,
+      };
+    }
+
+    case 'orders.ingest': {
+      const { orders, pageContext = {} } = payload || {};
+      if (!Array.isArray(orders)) {
+        throw new Error('orders must be an array');
+      }
+      return await db.ingestOrders(orders, pageContext);
     }
 
     case 'outgoing.claim':
