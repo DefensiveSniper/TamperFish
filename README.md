@@ -1,128 +1,131 @@
-# 闲鱼聊天记录聚合服务 (goofishAggregation)
+# Goofish Chat Aggregation Service (`goofishAggregation`)
 
-这是一个围绕闲鱼 PC Web 消息链路和千牛待发货订单链路做本地聚合、人工接管和自动回复的工具集。当前仓库已经打通了 6 条链路：
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-1. 油猴脚本在 `goofish.com/im` 页面采集会话、消息和会话侧元数据
-2. `sync.js` 通过 Chrome CDP 定时读取浏览器本地缓存并补采闲鱼消息
-3. 千牛油猴脚本在 `myseller.taobao.com/home.htm/batch-consign` 页面采集待发货订单
-4. 本地 API + SQLite 聚合会话、消息、订单，并在 `3210` 提供管理控制台
-5. 待发消息进入 `outgoing_messages` 队列，由浏览器脚本自动回填发送
-6. 千牛订单按 `buyer_user_id + product_id` 与闲鱼会话自动关联，并展示到控制台和聊天头部
+This repository is a local aggregation, manual takeover, and auto-reply toolkit built around the Goofish PC Web messaging flow and the Qianniu "pending shipment" order flow. The repository currently wires together 6 end-to-end pipelines:
 
-## 核心能力
+1. A Tampermonkey script collects sessions, messages, and session-side metadata from `goofish.com/im`
+2. `sync.js` periodically reads browser-local cache through Chrome CDP and backfills Goofish messages
+3. A Qianniu Tampermonkey script collects pending-shipment orders from `myseller.taobao.com/home.htm/batch-consign`
+4. A local API + SQLite aggregates sessions, messages, and orders, and serves the management console on port `3210`
+5. Outgoing messages enter the `outgoing_messages` queue and are sent back through the browser script
+6. Qianniu orders are automatically linked to Goofish sessions by `buyer_user_id + product_id` and shown both in the console and at the top of each chat
 
-- 会话聚合：前台油猴脚本与后台 CDP 双路采集，消息落地到 SQLite
-- 千牛订单采集：解析 `batch-consign` 订单卡片，落库订单号、买家、商品、金额、数量和收件信息
-- 订单关联：按 `buyer_user_id + product_id` 将千牛订单精准关联到闲鱼会话
-- 本地控制台：在 `http://127.0.0.1:3210` 查看会话、消息、待发队列
-- 订单控制台：订单抽屉支持查看脚本运行态、立即同步当前页和手动全量扫描
-- 人工回复：UI 右侧输入框会把消息压入 `pending` 队列，再由浏览器发送
-- AI 开关：UI 顶栏支持全局开启/关闭 AI 自动回复，便于人工接管
-- 巡逻开关：UI 顶栏支持远程开启 / 关闭油猴后台巡逻；不影响精准发送与按需补水
-- 启动初始化：项目启动后会先限量初始化同步会话历史，默认拉前 `30` 个会话
-- 未读监听：初始化完成后默认关闭自动巡逻，改为根据左侧未读角标增量同步新消息
-- 精准发送：浏览器脚本会主动 claim 待发任务，并优先按 `session_id` 定位目标会话后发送
-- 自动回复：Worker 消费 `outbox.new_messages`，生成回复后写入 `outgoing_messages`
-- 项目专用 Chrome：`npm start` 会自动拉起带 `18800` 调试端口的项目 Chrome
-- Chrome 代理：支持通过本地配置文件或环境变量给项目 Chrome 单独配置代理
-- 日志落盘：启动链路、Chrome、`sync.js`、API 和内置 worker 都会写入日志文件
+## Core Capabilities
 
-## 目录结构
+- Session aggregation: dual-path collection via the foreground Tampermonkey script and background CDP sync, with all messages persisted into SQLite
+- Qianniu order capture: parses `batch-consign` order cards and stores order ID, buyer, product, amount, quantity, and shipping info
+- Order matching: links Qianniu orders to Goofish sessions precisely by `buyer_user_id + product_id`
+- Local console: inspect sessions, messages, and the outgoing queue at `http://127.0.0.1:3210`
+- Order console: an order drawer lets you inspect script runtime state, sync the current page immediately, or trigger a manual full scan
+- Manual replies: the input box on the right side of the UI pushes messages into the `pending` queue and lets the browser send them
+- AI toggle: the top bar can globally enable or disable AI auto-replies for manual takeover scenarios
+- Patrol toggle: the top bar can remotely enable or disable background Tampermonkey patrol without affecting precise sending or on-demand backfill
+- Startup initialization: after the project starts, it initializes session history sync with a limit of `30` sessions by default
+- Unread monitoring: after initialization, continuous patrol is disabled by default and new messages are synced incrementally based on unread badges in the left-side session list
+- Precise sending: the browser script actively claims outgoing jobs and prioritizes locating the target conversation by `session_id` before sending
+- Auto-reply: the worker consumes `outbox.new_messages`, generates replies, and writes them into `outgoing_messages`
+- Project Chrome: `npm start` automatically launches a project-dedicated Chrome instance with remote debugging on port `18800`
+- Chrome proxy: supports configuring a dedicated proxy for the project Chrome instance through a local config file or environment variables
+- Log persistence: startup flow, Chrome, `sync.js`, the API, and the built-in worker all write logs to files
+
+## Directory Layout
 
 ```text
 goofishAggregation/
 ├── qianniu_capture/
-│   └── qianniu_batch_consign.js # Tampermonkey 脚本：千牛待发货订单采集
+│   └── qianniu_batch_consign.js # Tampermonkey script: capture Qianniu pending-shipment orders
 ├── xianyu_capture/
-│   └── xianyu_monitor.js      # Tampermonkey 脚本（当前面板版本 4.0）
+│   └── xianyu_monitor.js        # Tampermonkey script (current panel version 4.0)
 ├── server/
-│   ├── package.json           # Node 依赖与脚本
-│   ├── start.js               # 统一启动器：Chrome + API + sync.js
-│   ├── index.js               # Express API + 本地 UI
-│   ├── db.js                  # SQLite 数据层
-│   ├── sync.js                # CDP 同步守护进程
-│   ├── auto_reply_worker.js   # 自动回复 worker
-│   ├── ai.js                  # LLM 调用封装
-│   ├── public/                # 3210 控制台静态资源
-│   ├── data.db                # [自动生成] SQLite 数据库
-│   ├── server.log             # [自动生成] 启动器 / Chrome / sync 综合日志
-│   └── server3210.log         # [自动生成] API 与内置 worker 日志
+│   ├── package.json             # Node dependencies and scripts
+│   ├── start.js                 # Unified launcher: Chrome + API + sync.js
+│   ├── index.js                 # Express API + local UI
+│   ├── db.js                    # SQLite data layer
+│   ├── sync.js                  # CDP sync daemon
+│   ├── auto_reply_worker.js     # Auto-reply worker
+│   ├── ai.js                    # LLM integration wrapper
+│   ├── public/                  # Static assets for the 3210 console
+│   ├── data.db                  # [generated] SQLite database
+│   ├── server.log               # [generated] launcher / Chrome / sync combined log
+│   └── server3210.log           # [generated] API and built-in worker log
 ├── integrations/
-│   └── qianniu/               # 预留扩展
-└── agent_logs/                # 协作日志
+│   └── qianniu/                 # Reserved for future integrations
+└── agent_logs/                  # Collaboration logs
 ```
 
-## 环境要求
+## Requirements
 
-- Node.js 20+（当前机器实际使用 Node 22）
-- 桌面版 Google Chrome
-- Tampermonkey 扩展
-- 已登录的闲鱼网页版 `https://www.goofish.com/im`
+- Node.js 20+ (the current machine uses Node 22)
+- Desktop Google Chrome
+- Tampermonkey extension
+- A logged-in Goofish Web session at `https://www.goofish.com/im`
 
-## 安装依赖
+## Install Dependencies
 
-推荐使用锁文件安装：
+Using the lockfile is recommended:
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
 npm ci
 ```
 
-如果你明确接受重新解析依赖，也可以用：
+If you intentionally want to re-resolve dependencies, you can also run:
 
 ```bash
+cd /Users/snoopy/Desktop/goofishAggregation/server
 npm install
 ```
 
-## 启动方式
+## How to Start
 
-### 1. 一键启动整套链路
+### 1. Start the full stack with one command
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
 npm start
 ```
 
-默认会做这些事：
+By default this does all of the following:
 
-- 使用仓库下的项目专用 Chrome 目录 `.chrome-xianyu-profile`
-- 启动前自动清理项目 Chrome 的瞬态缓存与残留锁文件，但保留 `Sessions`，以便恢复上次会话和 session cookie
-- 如果 profile 中存在上次会话数据，则使用 Chrome 会话恢复模式启动，不重复注入初始 URL
-- 如果是首次启动或当前 profile 没有可恢复会话，则自动打开 `https://www.goofish.com/im` 与 `https://myseller.taobao.com/home.htm/batch-consign`
-- 为项目 Chrome 增加 `--allow-insecure-localhost`，允许脚本连接本地自签 `wss://localhost`
-- 为 Chrome 开启 `18800` 调试端口
-- 启动 API 服务 `127.0.0.1:3210`
-- 启动浏览器脚本专用 `wss://localhost:3211/ws/browser`
-- 启动 `sync.js`
-- 启动内置自动回复 worker
-- 监控 `18800`，如果项目 Chrome 被关掉会自动拉起
+- Uses the project Chrome directory `.chrome-xianyu-profile` inside the repository
+- Cleans transient cache and stale lock files from the project Chrome directory before startup, while keeping `Sessions` so the previous browser session and cookies can be restored
+- Starts Chrome in session-restore mode if previous session data exists in the profile, without reinjecting the initial URLs
+- Automatically opens `https://www.goofish.com/im` and `https://myseller.taobao.com/home.htm/batch-consign` if this is the first launch or the current profile has no recoverable session
+- Adds `--allow-insecure-localhost` to the project Chrome instance so scripts can connect to the locally self-signed `wss://localhost`
+- Opens the Chrome remote debugging port `18800`
+- Starts the API service at `127.0.0.1:3210`
+- Starts the browser-script WSS endpoint at `wss://localhost:3211/ws/browser`
+- Starts `sync.js`
+- Starts the built-in auto-reply worker
+- Monitors port `18800` and automatically relaunches the project Chrome instance if it is closed
 
-如果要排查代理是否导致项目 Chrome 启动异常，可以临时这样启动：
+If you want to troubleshoot whether the proxy is causing Chrome startup failures, you can temporarily start it like this:
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
 CHROME_PROXY_DISABLED=1 npm start
 ```
 
-如果你明确要保留当前缓存现场、不执行启动前清理，也可以临时关闭：
+If you explicitly want to preserve the current cache state and skip the pre-start cleanup, you can temporarily disable it:
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
 CHROME_CLEAR_TRANSIENT_DATA_ON_START=0 npm start
 ```
 
-### 2. 开发模式
+### 2. Development mode
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
 npm run dev
 ```
 
-这会用 `node --watch` 启动 API 入口，适合改后端代码时使用。
+This starts the API entry with `node --watch`, which is useful when editing backend code.
 
-### 3. 单独运行 worker
+### 3. Run the worker separately
 
-仅在调试时使用：
+Use this only for debugging:
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
@@ -132,76 +135,76 @@ npm run worker:once
 npm run worker:dry:once
 ```
 
-注意：
+Notes:
 
-- `npm start` 已经会启动内置 worker
-- 不要在 `npm start` 已运行的同时再额外跑 `npm run worker`，否则会出现多个 worker 并发消费同一批 `outbox` 事件的风险
+- `npm start` already launches the built-in worker
+- Do not run `npm run worker` in parallel with `npm start`, or multiple workers may consume the same `outbox` events concurrently
 
-## 浏览器端配置
+## Browser-Side Setup
 
-### 1. 安装并启用 Tampermonkey
+### 1. Install and enable Tampermonkey
 
-在 Chrome 中安装 Tampermonkey 扩展。
+Install the Tampermonkey extension in Chrome.
 
-### 2. 导入油猴脚本
+### 2. Import the Tampermonkey scripts
 
-导入并启用：
+Import and enable:
 
-- [xianyu_capture/xianyu_monitor.js](/Users/snoopy/Desktop/goofishAggregation/xianyu_capture/xianyu_monitor.js)
-- [qianniu_capture/qianniu_batch_consign.js](/Users/snoopy/Desktop/goofishAggregation/qianniu_capture/qianniu_batch_consign.js)
+- [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
+- [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
 
-当前闲鱼脚本面板版本为 `4.0`，千牛订单脚本版本为 `1.4`。每次脚本更新后，请确认 Tampermonkey 中版本文案也同步更新。
-千牛订单脚本首次导入后，请允许脚本访问 `trade.taobao.com`，用于抓取 `tradeSnap` 页面中的商品 ID。
+The current Goofish script panel version is `4.0`, and the Qianniu order script version is `1.4`. After each script update, make sure the version text inside Tampermonkey is updated as well.
+After importing the Qianniu order script for the first time, allow it to access `trade.taobao.com` so it can fetch the product ID from the `tradeSnap` page.
 
-当前脚本与本地服务的控制链路不再依赖高频 HTTP 轮询，而是走单条长连接：
+The control channel between the scripts and the local service no longer relies on high-frequency HTTP polling and now uses a single long-lived connection:
 
 - `wss://localhost:3211/ws/browser`
 
-项目启动时会自动为 localhost 生成一套本地开发证书，并让项目 Chrome 接受 localhost 自签证书。
+At startup, the project automatically generates a local development certificate for localhost and configures the project Chrome instance to trust the self-signed localhost certificate.
 
-### 3. 登录闲鱼 / 千牛网页版
+### 3. Log in to Goofish / Qianniu Web
 
-在项目 Chrome 中完成一次登录后，后续启动会优先恢复上次会话：
+After completing one login in the project Chrome instance, subsequent launches will try to restore the previous session:
 
 - [goofish.com/im](https://www.goofish.com/im)
 - [myseller.taobao.com/home.htm/batch-consign](https://myseller.taobao.com/home.htm/batch-consign)
 
-说明：
+Notes:
 
-- 闲鱼消息脚本运行在 `goofish.com/im`
-- 千牛订单脚本运行在 `batch-consign`
-- 千牛脚本会按 `orderId` 缓存已解密的买家信息；成功解密过的订单后续不再重复点击“解密”
-- 首次启动或使用全新 profile 时，启动器会自动打开闲鱼和千牛入口页
-- 如果当前 profile 中已有上次会话，启动器会恢复原有标签页和 session cookie，通常不需要手动重新打开千牛页面
+- The Goofish message script runs on `goofish.com/im`
+- The Qianniu order script runs on `batch-consign`
+- The Qianniu script caches decrypted buyer info by `orderId`; once an order has been decrypted successfully, it will not click "decrypt" again for that order later
+- On first launch or when using a brand-new profile, the launcher automatically opens both the Goofish and Qianniu entry pages
+- If the current profile already contains the previous session, the launcher restores the original tabs and cookies, so you usually do not need to manually reopen the Qianniu page
 
-脚本默认会先做一轮启动初始化：限量遍历前 `30` 个会话并尽量拉回历史记录，随后自动关闭常驻巡逻。
+By default, the scripts first perform a startup initialization pass: they iterate through the first `30` sessions and try to pull back recent history, then automatically stop continuous patrol.
 
-初始化完成后：
+After initialization:
 
-- 当前打开的会话会继续做轻量同步
-- 左侧带未读角标的会话会被按需打开并增量同步
-- 全量遍历只保留给手动开启巡逻和精准发送 fallback 使用
+- The currently open session continues lightweight syncing
+- Sessions with unread badges in the left-side list are opened on demand and synced incrementally
+- Full traversal is reserved for manually enabled patrol mode and precise-send fallback only
 
-## 3210 控制台说明
+## 3210 Console Overview
 
-打开：
+Open:
 
 - [http://127.0.0.1:3210](http://127.0.0.1:3210)
 
-当前 UI 支持：
+The current UI supports:
 
-- 左侧会话列表增量刷新，减少轮询闪烁
-- 右侧消息区主动刷新，当前会话有新消息时无需重新点左侧会话
-- 顶栏订单抽屉：查看千牛待发货订单、关联状态与脚本运行态，并支持立即同步当前页与手动全量扫描
-- 顶栏 AI 开关：全局开启 / 关闭自动回复
-- 顶栏巡逻开关：远程控制油猴后台巡逻，并显示脚本同步状态
-- 右侧人工回复输入框：消息先入 `pending` 队列，再由浏览器发送
-- 待发队列面板：区分 `AI` / `人工` 来源
-- 会话头部订单摘要：已精准关联的订单会显示在对应聊天顶部
+- Incremental refresh for the left-side session list to reduce polling flicker
+- Active refresh for the message panel on the right, so new messages in the current session appear without re-clicking the session on the left
+- Order drawer in the top bar: inspect Qianniu pending-shipment orders, matching status, and script runtime state, and trigger current-page sync or a manual full scan
+- AI toggle in the top bar: globally enable or disable auto-replies
+- Patrol toggle in the top bar: remotely control background Tampermonkey patrol and show script sync status
+- Manual reply input on the right: messages enter the `pending` queue first and are then sent by the browser
+- Outgoing queue panel: distinguishes `AI` and `manual` message sources
+- Order summary at the top of the chat: precisely matched orders are shown above the corresponding conversation
 
-## 环境变量与本地配置
+## Environment Variables and Local Configuration
 
-### AI / API 相关
+### AI / API
 
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
@@ -209,30 +212,30 @@ npm run worker:dry:once
 - `AUTO_REPLY_ENABLED`
 - `AUTO_REPLY_INTERVAL_MS`
 
-当前行为说明：
+Current behavior:
 
-- `AUTO_REPLY_ENABLED=0` 会把运行时 AI 开关初始化为关闭
-- 内置 worker 仍然会启动，但会跳过自动回复生成
+- `AUTO_REPLY_ENABLED=0` initializes the runtime AI toggle as disabled
+- The built-in worker still starts, but skips auto-reply generation
 
-### Chrome / 启动器相关
+### Chrome / Launcher
 
-- `PORT`：本地 API 端口，默认 `3210`
-- `BROWSER_WSS_PORT`：浏览器脚本专用 WSS 端口，默认 `3211`
-- `BROWSER_WSS_PATH`：浏览器脚本专用 WSS 路径，默认 `/ws/browser`
-- `BROWSER_WSS_CERT_PATH`：可选，自定义 localhost WSS 证书路径
-- `BROWSER_WSS_KEY_PATH`：可选，自定义 localhost WSS 私钥路径
-- `CDP_PORT`：Chrome DevTools 调试端口，默认 `18800`
-- `SYNC_INTERVAL`：`sync.js` 轮询间隔，默认 `5000`
-- `CHROME_PROFILE_NAME`：日志里显示的 profile 名，默认 `xianyu`
-- `CHROME_PROFILE_DIRECTORY`：项目 Chrome 目录中的 profile 目录名，默认 `Default`
-- `CHROME_USER_DATA_DIR`：项目 Chrome 用户数据目录，默认仓库下 `.chrome-xianyu-profile`
-- `GOOFISH_URL`：首次启动时默认打开的闲鱼页面，默认 `https://www.goofish.com/im`
-- `QIANNIU_URL`：首次启动时默认打开的千牛页面，默认 `https://myseller.taobao.com/home.htm/batch-consign`
-- `CHROME_MONITOR_INTERVAL_MS`：Chrome watchdog 检测间隔，默认 `3000`
-- `CHROME_CLEAR_TRANSIENT_DATA_ON_START`：启动前是否清理项目 Chrome 瞬态缓存，默认开启；保留 `Sessions` 用于恢复上次会话，设为 `0` 可关闭
-- `CHROME_START_TIMEOUT_MS`：等待 Chrome 打开 CDP 端口的超时时间，默认 `15000`
+- `PORT`: local API port, default `3210`
+- `BROWSER_WSS_PORT`: browser-script WSS port, default `3211`
+- `BROWSER_WSS_PATH`: browser-script WSS path, default `/ws/browser`
+- `BROWSER_WSS_CERT_PATH`: optional custom localhost WSS certificate path
+- `BROWSER_WSS_KEY_PATH`: optional custom localhost WSS private key path
+- `CDP_PORT`: Chrome DevTools remote debugging port, default `18800`
+- `SYNC_INTERVAL`: `sync.js` polling interval, default `5000`
+- `CHROME_PROFILE_NAME`: profile name shown in logs, default `xianyu`
+- `CHROME_PROFILE_DIRECTORY`: profile directory name inside the project Chrome directory, default `Default`
+- `CHROME_USER_DATA_DIR`: project Chrome user-data directory, default `.chrome-xianyu-profile` under the repository root
+- `GOOFISH_URL`: default Goofish page opened on first launch, default `https://www.goofish.com/im`
+- `QIANNIU_URL`: default Qianniu page opened on first launch, default `https://myseller.taobao.com/home.htm/batch-consign`
+- `CHROME_MONITOR_INTERVAL_MS`: Chrome watchdog interval, default `3000`
+- `CHROME_CLEAR_TRANSIENT_DATA_ON_START`: whether to clear transient cache from the project Chrome directory before startup; enabled by default while preserving `Sessions` for session restore, set to `0` to disable
+- `CHROME_START_TIMEOUT_MS`: timeout for waiting for Chrome to expose the CDP port, default `15000`
 
-### Chrome 代理相关
+### Chrome Proxy
 
 - `CHROME_PROXY_SERVER`
 - `CHROME_PROXY_USERNAME`
@@ -240,11 +243,11 @@ npm run worker:dry:once
 - `CHROME_PROXY_BYPASS_LIST`
 - `CHROME_PROXY_CONFIG_PATH`
 
-默认会优先读取本地文件：
+By default the launcher first tries to read the local file:
 
-- [server/.chrome-proxy.local.json](/Users/snoopy/Desktop/goofishAggregation/server/.chrome-proxy.local.json)
+- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
 
-示例：
+Example:
 
 ```json
 {
@@ -255,133 +258,133 @@ npm run worker:dry:once
 }
 ```
 
-说明：
+Notes:
 
-- 代理只作用于项目启动器拉起的那一个项目 Chrome，不影响你系统里其他普通 Chrome
-- 如果代理带账号密码，启动器会自动生成本地认证扩展 `server/.chrome-proxy-extension/`
-- 这两个本地文件/目录都已被 `.gitignore` 忽略
+- The proxy only affects the project Chrome instance launched by this repository and does not affect your normal Chrome instances
+- If the proxy requires a username and password, the launcher automatically generates a local authentication extension in `server/.chrome-proxy-extension/`
+- Both the local file and that generated directory are ignored by `.gitignore`
 
-### 自定义 Chrome 目录的注意事项
+### Notes on custom Chrome directories
 
-如果你要自定义 `CHROME_USER_DATA_DIR`：
+If you customize `CHROME_USER_DATA_DIR`:
 
-- 对一个全新的空目录，最好同时显式设置 `CHROME_PROFILE_DIRECTORY`
-- 如果只传 `CHROME_USER_DATA_DIR` 而不给 `CHROME_PROFILE_DIRECTORY`，当前启动器会尝试从该目录的 `Local State` 解析 profile；空目录下没有这个文件，启动会失败
+- For a brand-new empty directory, it is best to also set `CHROME_PROFILE_DIRECTORY` explicitly
+- If you pass only `CHROME_USER_DATA_DIR` without `CHROME_PROFILE_DIRECTORY`, the current launcher tries to parse the profile from `Local State`; startup fails when that file does not exist in an empty directory
 
-## 日志文件
+## Log Files
 
-默认日志位置：
+Default log locations:
 
-- [server/server.log](/Users/snoopy/Desktop/goofishAggregation/server/server.log)
-  - 启动器日志
-  - Chrome 输出
-  - `sync.js` 输出
-- [server/server3210.log](/Users/snoopy/Desktop/goofishAggregation/server/server3210.log)
-  - API 服务日志
-  - 内置 worker 日志
+- [server/server.log](server/server.log)
+  - Launcher logs
+  - Chrome output
+  - `sync.js` output
+- [server/server3210.log](server/server3210.log)
+  - API service logs
+  - Built-in worker logs
 
-## 数据库与队列
+## Database and Queues
 
-核心表：
+Core tables:
 
-- `sessions`：会话主表
-- `messages`：聊天消息
-- `outbox`：内部事件总线（`new_session` / `new_messages`）
-- `outgoing_messages`：待发送消息队列（`pending / sending / sent / failed`）
-- `app_settings`：运行时设置，例如 AI 开关
+- `sessions`: primary session table
+- `messages`: chat messages
+- `outbox`: internal event bus (`new_session` / `new_messages`)
+- `outgoing_messages`: outgoing message queue (`pending / sending / sent / failed`)
+- `app_settings`: runtime settings such as the AI toggle
 
-当前发送链路是：
+The current sending pipeline is:
 
-1. 新消息进入 `outbox`
-2. worker 生成回复，写入 `outgoing_messages.pending`
-3. 浏览器 sender loop 原子 claim 一条待发任务
-4. 优先按 `session_id` 精准定位目标会话；定位失败时再做限次 fallback 遍历补水
-5. 浏览器自动填写并发送
-6. 发送后立即补抓当前会话，保证新消息及时写回本地缓存
-7. API 回写状态为 `sent` 或 `failed`
+1. New messages enter `outbox`
+2. The worker generates a reply and writes it to `outgoing_messages.pending`
+3. The browser sender loop atomically claims one outgoing job
+4. It first tries to locate the target session precisely by `session_id`; if that fails, it performs a limited fallback traversal and backfill
+5. The browser automatically fills the input and sends the message
+6. Right after sending, the current session is resynced so the new message is written back to the local cache promptly
+7. The API writes the final status back as `sent` or `failed`
 
-## 常见问题
+## FAQ
 
-### 1. `3210` 有数据但右侧消息区不更新
+### 1. `3210` shows data, but the message panel on the right does not update
 
-刷新一次浏览器页面，确保拿到最新前端脚本。当前版本已经支持主动刷新当前会话。
+Refresh the browser page once to ensure you have the latest frontend script. The current version already supports active refresh for the current session.
 
-### 2. 数据库里出现“只有买家名、没有消息”的空会话
+### 2. The database contains "empty sessions" with only a buyer name and no messages
 
-后端已经在 `ingest()` 层拦截空快照，不会再把这种空壳写进 `sessions`。如果旧数据还在，可以手动清理数据库中的历史脏记录。
+The backend now blocks empty snapshots at the `ingest()` layer, so this kind of empty shell is no longer written into `sessions`. If old records still exist, clean up those historical dirty rows manually from the database.
 
-### 3. 项目 Chrome 被关掉了怎么办
+### 3. What if the project Chrome instance gets closed
 
-如果是通过 `npm start` 启动的，watchdog 会监控 `18800`，发现关闭后会自动重新拉起项目 Chrome。
+If it was started by `npm start`, the watchdog monitors port `18800` and automatically relaunches the project Chrome instance after it is closed.
 
-### 4. 切换代理怎么做
+### 4. How do I switch the proxy
 
-修改：
+Edit:
 
-- [server/.chrome-proxy.local.json](/Users/snoopy/Desktop/goofishAggregation/server/.chrome-proxy.local.json)
+- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
 
-然后重启：
+Then restart:
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
 npm start
 ```
 
-如果要临时绕过代理做故障排查，可以直接用：
+If you want to temporarily bypass the proxy for troubleshooting, use:
 
 ```bash
 cd /Users/snoopy/Desktop/goofishAggregation/server
 CHROME_PROXY_DISABLED=1 npm start
 ```
 
-## 当前已知限制
+## Current Known Limitations
 
-- 当前启动器只支持一个项目 Chrome 实例，还不能直接在同一个 `3210` 控制台里安全聚合多个卖家账号
-- `server/ai.js` 目前仍然保留了默认 API key fallback，生产环境不建议继续沿用
-- `outbox` 事件当前是“读后处理、处理完再标记”，如果同时运行多个 worker，存在重复消费风险
-- 当前精准发送仍依赖闲鱼页面内可读取的 `sessionInfo.sessionId`；如果页面结构变化，会退回到限次 fallback 遍历补水
+- The launcher currently supports only one project Chrome instance, so it cannot safely aggregate multiple seller accounts into the same `3210` console yet
+- `server/ai.js` still keeps a default API key fallback, which is not recommended for production use
+- `outbox` events are currently processed and marked afterward, so running multiple workers at the same time may cause duplicate consumption
+- Precise sending still depends on `sessionInfo.sessionId` being readable inside the Goofish page; if the page structure changes, it falls back to limited traversal and backfill
 
-## 下一步开发计划
+## Next Development Plan
 
-以下内容尚未实现，作为后续开发项保留：
+The items below are not implemented yet and are kept as future work.
 
-### 0. 方案文档（持续演进）
+### 0. Solution document (continuously evolving)
 
-关于多账号 / 商店并发聚合、多 worker 调度与精准发送的持续演进方案，统一维护在：
+The ongoing evolution plan for multi-account / multi-store aggregation, multi-worker scheduling, and precise sending is maintained in:
 
 - [docs/multi-shop-aggregation-evolution.md](docs/multi-shop-aggregation-evolution.md)
 
-说明：
+Notes:
 
-- README 这里只保留入口、范围与状态，不重复展开完整设计内容
-- 后续若方案有新增决策、假设修订或 TODO 调整，优先更新该文档，再视情况同步 README 摘要
+- The README keeps only the entry point, scope, and status instead of repeating the full design
+- If new decisions, assumptions, or TODO changes are added later, update that document first and sync the README summary only when needed
 
-### 1. 多开 Chrome 与多代理
+### 1. Multiple Chrome instances and multiple proxies
 
-目标：
+Goals:
 
-- 支持同时拉起多个项目 Chrome 实例
-- 每个实例可单独配置 `userDataDir`、`profileDirectory`、`cdpPort` 和代理
-- 同一个 `3210` 控制台能够汇总展示多个实例的数据
+- Support launching multiple project Chrome instances at the same time
+- Allow each instance to configure its own `userDataDir`, `profileDirectory`, `cdpPort`, and proxy independently
+- Let the same `3210` console display aggregated data from multiple instances
 
-计划改造范围：
+Planned refactor scope:
 
 - `server/start.js`
-  - 改成实例列表驱动，而不是当前单实例模式
-  - 每个实例单独维护 watchdog、Chrome 进程和代理配置
+  - Refactor from the current single-instance mode to an instance-list-driven model
+  - Maintain a separate watchdog, Chrome process, and proxy config for each instance
 - `server/sync.js`
-  - 改成“一实例一同步进程”
-  - 上报数据时带上 `instanceId`
+  - Refactor to "one sync process per instance"
+  - Include `instanceId` when reporting data
 - `xianyu_capture/xianyu_monitor.js`
-  - 会话快照、待发消息匹配和发送状态回写都带上实例标识
+  - Include instance identifiers in session snapshots, outgoing-message matching, and send-status writeback
 - `server/db.js`
-  - 为 `sessions`、`messages`、`outbox`、`outgoing_messages` 增加 `instance_id` / `account_id` 维度
-  - 避免不同 Chrome 或不同卖家账号之间的 `chat_key` 冲突
-- `server/index.js` 与 `server/public/`
-  - 在 UI 中展示会话来源实例
-  - 增加按实例筛选或切换能力
+  - Add `instance_id` / `account_id` dimensions to `sessions`, `messages`, `outbox`, and `outgoing_messages`
+  - Avoid `chat_key` collisions across different Chrome instances or seller accounts
+- `server/index.js` and `server/public/`
+  - Show the source instance for each session in the UI
+  - Add filtering or switching by instance
 
-当前状态说明：
+Current status:
 
-- 现在只是在启动层面具备“未来可扩展成多实例”的基础
-- 如果当前直接强行多开多个 Chrome 并接入同一个数据库，会有会话串线、待发消息串发和 UI 混淆风险
+- The codebase only has a startup-layer foundation that could be extended to multi-instance support in the future
+- If you force multiple Chrome instances to write into the same database today, you risk session mix-ups, outgoing-message cross-send issues, and UI confusion

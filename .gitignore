@@ -3,6 +3,7 @@
 .chrome-proxy-extension/
 .claude/
 agent_logs/
+docs/
 node_modules/
 server/.chrome-proxy.local.json
 server/.chrome-proxy-extension/
