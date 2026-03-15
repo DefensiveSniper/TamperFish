@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         千牛待发货订单采集 (v1.4)
+// @name         千牛待发货订单采集 (v1.5)
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  采集千牛待发货订单并同步到本地 goofishAggregation 控制台，支持买家信息解密与商品 ID 补全
 // @author       Codex
 // @match        https://myseller.taobao.com/home.htm/batch-consign*
@@ -13,7 +13,7 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '1.4';
+    const SCRIPT_VERSION = '1.5';
     const CONFIG = {
         apiWebSocketUrl: 'wss://localhost:3211/ws/browser',
         apiRequestTimeoutMs: 10000,
