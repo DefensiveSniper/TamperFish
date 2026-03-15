@@ -8,6 +8,8 @@
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @connect      trade.taobao.com
+// @downloadURL  http://localhost:3210/scripts/qianniu_batch_consign.user.js
+// @updateURL    http://localhost:3210/scripts/qianniu_batch_consign.meta.js
 // ==/UserScript==
 
 (function () {
