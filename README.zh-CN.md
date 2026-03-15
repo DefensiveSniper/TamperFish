@@ -1,4 +1,4 @@
-# 闲鱼聊天记录聚合服务 (`goofishAggregation`)
+# 闲鱼聊天记录聚合服务 (`TamperFish`)
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
