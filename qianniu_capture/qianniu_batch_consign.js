@@ -32,6 +32,7 @@
         decryptRetryCooldownMs: 60000,
         detailRequestTimeoutMs: 10000,
         detailRetryCooldownMs: 300000,
+        pendingSyncNonceStorageKey: 'goofish_qianniu_pending_sync_nonce',
     };
 
     const state = {
@@ -1672,20 +1673,14 @@
 
         state.activeSyncNowNonce = syncNonce;
         renderPanel();
+
+        // 千牛页面订单数据随页面刷新而更新，因此保存 nonce 后刷新页面
         try {
-            const result = await syncCurrentPageOrders({
-                mode: 'current-page',
-                force: true,
-            });
-            if (result) {
-                state.lastHandledSyncNowNonce = syncNonce;
-            }
-        } finally {
-            if (state.activeSyncNowNonce === syncNonce) {
-                state.activeSyncNowNonce = null;
-            }
-            renderPanel();
+            localStorage.setItem(CONFIG.pendingSyncNonceStorageKey, syncNonce);
+        } catch (e) {
+            console.warn('[QN] failed to save sync nonce to localStorage:', e);
         }
+        location.reload();
     }
 
     /**
@@ -1830,6 +1825,15 @@
             return;
         }
 
+        // 恢复 reload 前保存的立即同步 nonce
+        let pendingSyncNonce = null;
+        try {
+            pendingSyncNonce = localStorage.getItem(CONFIG.pendingSyncNonceStorageKey);
+            if (pendingSyncNonce) {
+                localStorage.removeItem(CONFIG.pendingSyncNonceStorageKey);
+            }
+        } catch (e) { /* ignore */ }
+
         createPanel();
         connectBrowserApiSocket().catch((error) => {
             console.warn('[QN] browser api socket init failed:', error.message || error);
@@ -1837,6 +1841,11 @@
         scheduleCurrentPageSync({ force: true });
         startHeartbeatLoop();
         startCurrentPageSyncLoop();
+
+        // 页面已刷新并完成首次同步，标记 nonce 为已处理，下次 heartbeat 回报给服务器
+        if (pendingSyncNonce) {
+            state.lastHandledSyncNowNonce = pendingSyncNonce;
+        }
     }
 
     window.addEventListener('beforeunload', closeBrowserApiSocket);
