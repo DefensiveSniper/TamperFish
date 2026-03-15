@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         闲鱼消息监控与导出 (v4.0)
+// @name         闲鱼消息监控与导出 (v4.1)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.1
 // @description  监控闲鱼网页版消息，支持精准发送、后台巡逻远程控制与数据持久化
 // @author       XiaoWai
 // @match        https://www.goofish.com/im*
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '4.0';
+    const SCRIPT_VERSION = '4.1';
 
     // --- 用户配置区 (User Configuration) ---
     const CONFIG = {
@@ -87,6 +87,8 @@
         activeSyncBusy: false,
         initializationBusy: false,
         initializationCompleted: false,
+        activeInitialCrawlNonce: null,
+        lastHandledInitialCrawlNonce: null,
         unreadWatchBusy: false,
         unreadHandledAt: {}
     };
@@ -1212,10 +1214,18 @@
      * 初始化完成后自动关闭常驻巡逻，但保留遍历能力作为精准发送 fallback。
      * @returns {Promise<void>}
      */
-    async function runInitialConversationSync() {
-        if (state.initializationBusy || state.initializationCompleted) {
+    async function runInitialConversationSync(syncNonce, sessionCount) {
+        if (state.initializationBusy) {
             return;
         }
+        if (!syncNonce) {
+            return;
+        }
+        if (syncNonce === state.lastHandledInitialCrawlNonce || syncNonce === state.activeInitialCrawlNonce) {
+            return;
+        }
+
+        const limit = sessionCount || CONFIG.initialConversationSyncLimit;
 
         const workspaceReady = await waitForChatWorkspaceReady();
         if (!workspaceReady) {
@@ -1225,8 +1235,9 @@
         }
 
         state.initializationBusy = true;
+        state.activeInitialCrawlNonce = syncNonce;
         setCrawlingEnabled(false, 'startup-init', { transient: true });
-        state.statusText = `初始化同步中（最多 ${CONFIG.initialConversationSyncLimit} 个会话）...`;
+        state.statusText = `初始化同步中（最多 ${limit} 个会话）...`;
         renderFooter();
 
         const visited = new Set();
@@ -1242,7 +1253,7 @@
             await sleep(300);
             await sleep(CONFIG.startupPostReadyDelayMs);
 
-            while (processed < CONFIG.initialConversationSyncLimit) {
+            while (processed < limit) {
                 if (isUserTypingMessage() || state.senderBusy) {
                     await sleep(800);
                     continue;
@@ -1268,7 +1279,7 @@
                 if (targetItem && targetMeta) {
                     visited.add(targetMeta.visitKey);
                     processed += 1;
-                    state.statusText = `初始化同步 ${processed}/${CONFIG.initialConversationSyncLimit}: ${targetMeta.title}`;
+                    state.statusText = `初始化同步 ${processed}/${limit}: ${targetMeta.title}`;
                     renderFooter();
                     await captureConversationFromListItem(targetItem, {
                         expectedCustomerName: targetMeta.title,
@@ -1291,6 +1302,8 @@
         } finally {
             state.initializationBusy = false;
             state.initializationCompleted = true;
+            state.lastHandledInitialCrawlNonce = syncNonce;
+            state.activeInitialCrawlNonce = null;
             setCrawlingEnabled(false, 'startup-init-finish');
             setCrawlingEnabled(true, 'startup-init', { transient: true });
             await persistCrawlerDesiredState(false);
@@ -1940,11 +1953,19 @@
             const payload = await browserApiRequest('browser.heartbeat', {
                 crawlerEnabled: state.crawlingDesiredEnabled,
                 currentChatKey: state.currentKey,
-                currentSessionId: state.currentSessionId
+                currentSessionId: state.currentSessionId,
+                initialCrawlNonceHandled: state.lastHandledInitialCrawlNonce
             });
             if (typeof payload.crawlerDesiredEnabled === 'boolean'
                 && payload.crawlerDesiredEnabled !== state.crawlingDesiredEnabled) {
                 setCrawlingEnabled(payload.crawlerDesiredEnabled, 'remote-sync');
+            }
+            // 检查是否有新的初始遍历请求
+            if (payload.initialCrawlNonce
+                && payload.initialCrawlNonce !== state.lastHandledInitialCrawlNonce
+                && payload.initialCrawlNonce !== state.activeInitialCrawlNonce
+                && !state.initializationBusy) {
+                runInitialConversationSync(payload.initialCrawlNonce, payload.initialCrawlSessionCount);
             }
         } catch (error) {
             console.warn('[XM] heartbeat failed:', error.message || error);
@@ -1957,6 +1978,21 @@
     function startHeartbeatLoop() {
         syncCrawlerHeartbeat();
         startSerialLoop(syncCrawlerHeartbeat, CONFIG.heartbeatIntervalMs, { immediate: false });
+    }
+
+    /**
+     * 定时检测闲鱼IM页面的"连接中断，请重连"弹窗，检测到后自动刷新页面。
+     */
+    function startDisconnectDialogWatcher() {
+        setInterval(() => {
+            const modal = document.querySelector('.ant-modal');
+            if (!modal) return;
+            const title = modal.querySelector('.ant-modal-title');
+            if (title && title.textContent.includes('连接中断')) {
+                console.warn('[XM] 检测到连接中断弹窗，自动刷新页面');
+                location.reload();
+            }
+        }, 5000);
     }
 
     function init() {
@@ -1974,8 +2010,8 @@
         startHeartbeatLoop();
         startSenderLoop();
         startActiveConversationSyncLoop();
-        runInitialConversationSync();
         startUnreadWatchLoop();
+        startDisconnectDialogWatcher();
     }
 
     window.addEventListener('beforeunload', closeBrowserApiSocket);

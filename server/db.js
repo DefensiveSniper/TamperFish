@@ -1544,6 +1544,21 @@ async function ensureRuntimeSettings(defaults = {}) {
      VALUES('qianniu_last_sync_stats', '{}', unixepoch())
      ON CONFLICT(key) DO NOTHING`
   );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('initial_crawl_session_count', '30', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('initial_crawl_requested_nonce', '', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
+  await db.run(
+    `INSERT INTO app_settings(key, value, updated_at)
+     VALUES('initial_crawl_handled_nonce', '', unixepoch())
+     ON CONFLICT(key) DO NOTHING`
+  );
 }
 
 /**
@@ -1590,6 +1605,9 @@ async function setCrawlerDesiredEnabled(enabled) {
 async function updateCrawlerHeartbeat(runtimeState) {
   await setAppSetting('crawler_reported_enabled', runtimeState.crawlerEnabled ? '1' : '0');
   await setAppSetting('crawler_last_heartbeat_at', String(Math.floor(Date.now() / 1000)));
+  if (runtimeState.initialCrawlNonceHandled) {
+    await setAppSetting('initial_crawl_handled_nonce', runtimeState.initialCrawlNonceHandled);
+  }
 }
 
 /**
@@ -1602,13 +1620,18 @@ async function updateCrawlerHeartbeat(runtimeState) {
  * }>} 当前设置快照。
  */
 async function getRuntimeSettings() {
-  const [autoReplyEnabled, crawlerDesiredEnabled, crawlerReportedValue, crawlerLastHeartbeatValue] =
-    await Promise.all([
-      isAutoReplyEnabled(),
-      isCrawlerDesiredEnabled(),
-      getAppSetting('crawler_reported_enabled', ''),
-      getAppSetting('crawler_last_heartbeat_at', '0'),
-    ]);
+  const [
+    autoReplyEnabled, crawlerDesiredEnabled, crawlerReportedValue, crawlerLastHeartbeatValue,
+    initialCrawlSessionCountValue, initialCrawlRequestedNonce, initialCrawlHandledNonce,
+  ] = await Promise.all([
+    isAutoReplyEnabled(),
+    isCrawlerDesiredEnabled(),
+    getAppSetting('crawler_reported_enabled', ''),
+    getAppSetting('crawler_last_heartbeat_at', '0'),
+    getAppSetting('initial_crawl_session_count', '30'),
+    getAppSetting('initial_crawl_requested_nonce', ''),
+    getAppSetting('initial_crawl_handled_nonce', ''),
+  ]);
 
   return {
     autoReplyEnabled,
@@ -1618,6 +1641,11 @@ async function getRuntimeSettings() {
         ? null
         : crawlerReportedValue === '1',
     crawlerLastHeartbeatAt: Number(crawlerLastHeartbeatValue || 0),
+    initialCrawlSessionCount: Number(initialCrawlSessionCountValue) || 30,
+    initialCrawlNonce:
+      initialCrawlRequestedNonce && initialCrawlRequestedNonce !== initialCrawlHandledNonce
+        ? initialCrawlRequestedNonce
+        : null,
   };
 }
 
@@ -1765,6 +1793,34 @@ async function getQianniuRuntime() {
   };
 }
 
+/**
+ * 读取初始遍历会话数量。
+ * @returns {Promise<number>}
+ */
+async function getInitialCrawlSessionCount() {
+  const value = await getAppSetting('initial_crawl_session_count', '30');
+  return Number(value) || 30;
+}
+
+/**
+ * 设置初始遍历会话数量。
+ * @param {number} n
+ * @returns {Promise<void>}
+ */
+async function setInitialCrawlSessionCount(n) {
+  await setAppSetting('initial_crawl_session_count', String(Math.max(1, Math.min(100, n))));
+}
+
+/**
+ * 生成一个新的初始遍历 nonce，触发油猴脚本执行初始遍历。
+ * @returns {Promise<{requestedNonce: string}>}
+ */
+async function requestInitialCrawl() {
+  const requestedNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await setAppSetting('initial_crawl_requested_nonce', requestedNonce);
+  return { requestedNonce };
+}
+
 module.exports = {
   ingest,
   listSessions,
@@ -1794,5 +1850,8 @@ module.exports = {
   requestQianniuSyncNow,
   requestQianniuFullScan,
   getQianniuRuntime,
+  getInitialCrawlSessionCount,
+  setInitialCrawlSessionCount,
+  requestInitialCrawl,
 
 };

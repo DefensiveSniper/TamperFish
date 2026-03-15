@@ -96,9 +96,11 @@ app.get('/api/settings', async (_req, res) => {
 // ── PATCH /api/settings ──────────────────────────────────────────────────────
 
 app.patch('/api/settings', async (req, res) => {
-  const { autoReplyEnabled, crawlerDesiredEnabled } = req.body || {};
-  if (typeof autoReplyEnabled !== 'boolean' && typeof crawlerDesiredEnabled !== 'boolean') {
-    return res.status(400).json({ error: 'at least one boolean setting is required' });
+  const { autoReplyEnabled, crawlerDesiredEnabled, initialCrawlSessionCount } = req.body || {};
+  const hasBool = typeof autoReplyEnabled === 'boolean' || typeof crawlerDesiredEnabled === 'boolean';
+  const hasCount = typeof initialCrawlSessionCount === 'number';
+  if (!hasBool && !hasCount) {
+    return res.status(400).json({ error: 'at least one setting is required' });
   }
 
   try {
@@ -108,8 +110,26 @@ app.patch('/api/settings', async (req, res) => {
     if (typeof crawlerDesiredEnabled === 'boolean') {
       await db.setCrawlerDesiredEnabled(crawlerDesiredEnabled);
     }
+    if (hasCount) {
+      await db.setInitialCrawlSessionCount(initialCrawlSessionCount);
+    }
     res.json({
       ok: true,
+      ...(await db.getRuntimeSettings()),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/initial-crawl ─────────────────────────────────────────────────
+
+app.post('/api/initial-crawl', async (_req, res) => {
+  try {
+    const result = await db.requestInitialCrawl();
+    res.status(202).json({
+      ok: true,
+      requestedNonce: result.requestedNonce,
       ...(await db.getRuntimeSettings()),
     });
   } catch (err) {
@@ -370,12 +390,12 @@ async function handleBrowserRpcAction(action, payload = {}) {
     }
 
     case 'browser.heartbeat': {
-      const { crawlerEnabled } = payload;
+      const { crawlerEnabled, initialCrawlNonceHandled } = payload;
       if (typeof crawlerEnabled !== 'boolean') {
         throw new Error('crawlerEnabled must be boolean');
       }
 
-      await db.updateCrawlerHeartbeat({ crawlerEnabled });
+      await db.updateCrawlerHeartbeat({ crawlerEnabled, initialCrawlNonceHandled });
       return await db.getRuntimeSettings();
     }
 
@@ -544,6 +564,8 @@ async function bootstrapSettings() {
     autoReplyEnabled: process.env.AUTO_REPLY_ENABLED !== '0',
     crawlerDesiredEnabled: process.env.CRAWLER_DESIRED_ENABLED !== '0',
   });
+  // 每次服务启动时生成新的初始遍历 nonce，油猴脚本首次 heartbeat 时触发遍历
+  await db.requestInitialCrawl();
 }
 
 /**

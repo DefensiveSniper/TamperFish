@@ -1337,6 +1337,8 @@
         <span id="crawler-toggle-label">巡逻开启</span>
       </button>
       <span id="crawler-runtime" class="runtime-badge offline" title="油猴脚本 xm-crawl-toggle 的实际同步状态">油猴未同步</span>
+      <input type="number" id="initial-crawl-count" min="1" max="100" value="30" title="初始遍历会话数量" style="width:48px;padding:2px 4px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#eee;font-size:12px;text-align:center;" />
+      <button class="btn" id="initial-crawl-btn" title="手动触发初始遍历 N 个会话">初始遍历</button>
       <button class="btn" id="orders-btn" title="查看千牛订单">📦 订单</button>
       <button class="btn" id="queue-btn" title="查看待发队列">📤 待发队列</button>
       <button class="btn" id="refresh-btn">↻ 刷新</button>
@@ -1399,6 +1401,8 @@
     const crawlerToggleBtn = document.getElementById('crawler-toggle');
     const crawlerToggleLabel = document.getElementById('crawler-toggle-label');
     const crawlerRuntimeEl = document.getElementById('crawler-runtime');
+    const initialCrawlBtn = document.getElementById('initial-crawl-btn');
+    const initialCrawlCountInput = document.getElementById('initial-crawl-count');
     const ordersOverlayEl = document.getElementById('orders-overlay');
     const ordersDrawerEl = document.getElementById('orders-drawer');
     const ordersRuntimeEl = document.getElementById('orders-runtime');
@@ -1456,7 +1460,9 @@
       autoReplyEnabled: true,
       crawlerDesiredEnabled: true,
       crawlerReportedEnabled: null,
-      crawlerLastHeartbeatAt: 0
+      crawlerLastHeartbeatAt: 0,
+      initialCrawlSessionCount: 30,
+      initialCrawlNonce: null
     };
     let chatCache = {};
     let isPollingDashboard = false;
@@ -1483,6 +1489,7 @@
         appSettings = await j('/api/settings');
         renderAiToggle();
         renderCrawlerToggle();
+        renderInitialCrawl();
         renderStats();
       } catch (e) {
         if (!silent) toast('❌ ' + e.message, 'error');
@@ -1990,6 +1997,39 @@
         toast('❌ ' + e.message, 'error');
       }
       crawlerToggleBtn.disabled = false;
+    }
+
+    function renderInitialCrawl() {
+      const count = appSettings.initialCrawlSessionCount || 30;
+      if (initialCrawlCountInput && Number(initialCrawlCountInput.value) !== count) {
+        initialCrawlCountInput.value = count;
+      }
+      if (initialCrawlBtn) {
+        const busy = !!appSettings.initialCrawlNonce;
+        initialCrawlBtn.disabled = busy;
+        initialCrawlBtn.textContent = busy ? '遍历中…' : '初始遍历';
+      }
+    }
+
+    async function triggerInitialCrawl() {
+      const count = Number(initialCrawlCountInput.value) || 30;
+      initialCrawlBtn.disabled = true;
+      try {
+        // 先保存数量设置
+        await j('/api/settings', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initialCrawlSessionCount: count }),
+        });
+        // 触发初始遍历
+        const result = await j('/api/initial-crawl', { method: 'POST' });
+        appSettings = { ...appSettings, ...result };
+        renderInitialCrawl();
+        toast('已请求初始遍历 ' + count + ' 个会话');
+      } catch (e) {
+        toast('❌ ' + e.message, 'error');
+        initialCrawlBtn.disabled = false;
+      }
     }
 
     async function loadSessions() {
@@ -2587,6 +2627,7 @@
     ordersFullScanBtn.addEventListener('click', requestOrdersFullScan);
     aiToggleBtn.addEventListener('click', toggleAutoReply);
     crawlerToggleBtn.addEventListener('click', toggleCrawler);
+    initialCrawlBtn.addEventListener('click', triggerInitialCrawl);
     refreshBtn.addEventListener('click', () => {
       loadSettings();
       loadQianniuRuntime(true);
