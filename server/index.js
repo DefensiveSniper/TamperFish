@@ -309,6 +309,7 @@ const USERSCRIPT_MAP = Object.fromEntries(
 );
 
 app.get('/scripts/:scriptName.user.js', (req, res) => {
+  console.log(`[scripts] GET ${req.path} (from ${req.headers['user-agent'] || 'unknown'})`);
   const filePath = USERSCRIPT_MAP[req.params.scriptName];
   if (!filePath || !fs.existsSync(filePath)) {
     return res.status(404).end('Script not found');
@@ -319,6 +320,7 @@ app.get('/scripts/:scriptName.user.js', (req, res) => {
 });
 
 app.get('/scripts/:scriptName.meta.js', (req, res) => {
+  console.log(`[scripts] GET ${req.path} (from ${req.headers['user-agent'] || 'unknown'})`);
   const filePath = USERSCRIPT_MAP[req.params.scriptName];
   if (!filePath || !fs.existsSync(filePath)) {
     return res.status(404).end('Script not found');
