@@ -224,8 +224,35 @@ async function triggerTampermonkeyUpdate({ cdpPort, tampermonkeyExtensionId }) {
       throw new Error('Dashboard batch update failed: ' + detail);
     }
 
-    // 等待 Tampermonkey 完成更新检查
-    await sleep(5000);
+    // 等待 Tampermonkey 完成更新检查与下载
+    await sleep(8000);
+
+    // 诊断：读取 Dashboard 上脚本的版本号，确认更新是否真正生效
+    const diagResult = await sendCommand('Runtime.evaluate', {
+      expression: `
+        (function () {
+          // 刷新页面获取最新状态
+          // 不刷新，直接读取当前 DOM 中的版本信息
+          var rows = document.querySelectorAll('tr, .script-item, [class*="script"]');
+          var scripts = [];
+          rows.forEach(function (row) {
+            var text = row.textContent || '';
+            // 匹配脚本名和版本号模式
+            var nameMatch = text.match(/(闲鱼消息监控|千牛待发货|xianyu_monitor|qianniu)/i);
+            var verMatch = text.match(/\\b(\\d+\\.\\d+(?:\\.\\d+)?)\\b/);
+            if (nameMatch) {
+              scripts.push(nameMatch[0] + ':' + (verMatch ? verMatch[0] : 'no-ver'));
+            }
+          });
+          return scripts.length > 0 ? scripts.join(' | ') : 'no-scripts-found-in-dom';
+        })()
+      `,
+      returnByValue: true,
+      awaitPromise: false,
+    }).catch((e) => ({ result: { value: 'diag-error: ' + e.message } }));
+
+    const diagDetail = diagResult?.result?.value || 'no-diag';
+    console.log(`[script-updater] Dashboard 脚本版本诊断: ${diagDetail}`);
 
     // 取消全选，恢复 Dashboard 状态
     await sendCommand('Runtime.evaluate', {
