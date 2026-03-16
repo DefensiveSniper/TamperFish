@@ -161,32 +161,52 @@ async function triggerTampermonkeyUpdate({ cdpPort, tampermonkeyExtensionId }) {
     });
     await sleep(1500);
 
-    // 查找并点击"检查用户脚本更新"按钮（兼容中英文）
+    // 查找并点击"检查用户脚本更新"按钮。
+    // Tampermonkey 的 UI 由 JS 动态生成，元素类型不固定（可能是 div/span/a/button），
+    // 因此遍历所有可见的可点击元素，按文本内容匹配。
     const clickResult = await sendCommand('Runtime.evaluate', {
       expression: `
         (function () {
-          var candidates = document.querySelectorAll('button, input[type="button"], a.btn, div[role="button"], span[role="button"]');
-          for (var i = 0; i < candidates.length; i++) {
-            var text = (candidates[i].textContent || candidates[i].value || '').trim().toLowerCase();
-            if (
-              text.includes('check for userscript updates') ||
-              text.includes('检查用户脚本更新') ||
-              text.includes('check for script updates')
-            ) {
-              candidates[i].click();
-              return 'clicked';
+          var keywords = [
+            'check for userscript updates',
+            '检查用户脚本更新',
+            'check for script updates',
+          ];
+          var all = document.querySelectorAll('*');
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (el.children.length > 0) continue;          // 只匹配叶子节点
+            var text = (el.textContent || '').trim().toLowerCase();
+            if (!text) continue;
+            for (var k = 0; k < keywords.length; k++) {
+              if (text.includes(keywords[k])) {
+                // 点击自身，若无效则冒泡到最近的可点击祖先
+                el.click();
+                if (el.parentElement && el.parentElement !== document.body) {
+                  el.parentElement.click();
+                }
+                return 'clicked: ' + text.substring(0, 60);
+              }
             }
           }
-          return 'button-not-found';
+          // 调试：收集页面所有可见文本片段便于排查
+          var texts = [];
+          var leaves = document.querySelectorAll('*');
+          for (var j = 0; j < leaves.length; j++) {
+            if (leaves[j].children.length === 0 && leaves[j].textContent.trim()) {
+              texts.push(leaves[j].textContent.trim().substring(0, 80));
+            }
+          }
+          return 'button-not-found|page-texts:' + texts.join(' /// ').substring(0, 2000);
         })()
       `,
       returnByValue: true,
       awaitPromise: false,
     });
 
-    const detail = clickResult?.result?.value;
-    if (detail === 'button-not-found') {
-      throw new Error('Could not find the "Check for userscript updates" button on Tampermonkey utilities page');
+    const detail = clickResult?.result?.value || 'no-result';
+    if (detail.startsWith('button-not-found')) {
+      throw new Error('Could not find update button on Tampermonkey utilities page. Debug: ' + detail.substring(0, 500));
     }
 
     // 等待 Tampermonkey 完成更新检查
@@ -259,23 +279,57 @@ async function fallbackEditorUpdate({ cdpPort, tampermonkeyExtensionId, scriptFi
 
     await sleep(500);
 
-    // 触发保存：优先点击保存按钮，兜底 Ctrl+S
+    // 触发保存：依次尝试多种方式
     const saveResult = await sendCommand('Runtime.evaluate', {
       expression: `
         (function () {
-          var buttons = document.querySelectorAll('button, input[type="button"], div[role="button"]');
-          for (var i = 0; i < buttons.length; i++) {
-            var text = (buttons[i].textContent || buttons[i].value || '').trim().toLowerCase();
-            if (text.includes('save') || text === '保存' || text.includes('file_download')) {
-              buttons[i].click();
-              return 'clicked-save';
+          // 方式 1：点击保存按钮（遍历所有叶子节点匹配文本）
+          var saveKeywords = ['save', '保存'];
+          var all = document.querySelectorAll('*');
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            var text = (el.textContent || el.value || '').trim().toLowerCase();
+            // 精确匹配短文本避免误触（如匹配到 "save as" 之类的长文本也可以）
+            if (text && text.length < 30) {
+              for (var k = 0; k < saveKeywords.length; k++) {
+                if (text === saveKeywords[k] || text === saveKeywords[k] + '...') {
+                  el.click();
+                  if (el.parentElement) el.parentElement.click();
+                  return 'clicked-save: ' + text;
+                }
+              }
             }
           }
-          // Ctrl+S fallback
+
+          // 方式 2：通过 CodeMirror API 触发保存
+          var cmEl = document.querySelector('.CodeMirror');
+          var cm = cmEl && cmEl.CodeMirror;
+          if (cm) {
+            // CM5 的 save() 方法（Tampermonkey 可能通过 extraKeys 注册了 Ctrl-S）
+            if (typeof cm.save === 'function') {
+              cm.save();
+              return 'cm-save';
+            }
+
+            // 在 CM 的 input 元素上模拟 Ctrl+S（CM 监听自己的 textarea）
+            var inputField = cm.getInputField();
+            if (inputField) {
+              var evt = new KeyboardEvent('keydown', {
+                key: 's', code: 'KeyS', keyCode: 83,
+                ctrlKey: true, metaKey: false,
+                bubbles: true, cancelable: true,
+              });
+              inputField.dispatchEvent(evt);
+              return 'cm-input-ctrl-s';
+            }
+          }
+
+          // 方式 3：在 document 上兜底（最后手段）
           document.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 's', code: 'KeyS', ctrlKey: true, bubbles: true
+            key: 's', code: 'KeyS', keyCode: 83,
+            ctrlKey: true, bubbles: true, cancelable: true,
           }));
-          return 'dispatched-ctrl-s';
+          return 'document-ctrl-s';
         })()
       `,
       returnByValue: true,
