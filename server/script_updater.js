@@ -47,7 +47,12 @@ async function listCdpTargets(cdpPort) {
  * @returns {Promise<{id: string, webSocketDebuggerUrl?: string}>}
  */
 async function openNewTab(cdpPort, url) {
-  const res = await fetch(`http://127.0.0.1:${cdpPort}/json/new?${encodeURIComponent(url)}`);
+  const endpoint = `http://127.0.0.1:${cdpPort}/json/new?${encodeURIComponent(url)}`;
+  // 新版 Chrome 要求 PUT，旧版接受 GET；优先 PUT，失败后回退 GET
+  let res = await fetch(endpoint, { method: 'PUT' });
+  if (res.status === 405) {
+    res = await fetch(endpoint);
+  }
   if (!res.ok) throw new Error(`Failed to open new tab: HTTP ${res.status}`);
   return res.json();
 }
@@ -59,7 +64,11 @@ async function openNewTab(cdpPort, url) {
  */
 async function closeTab(cdpPort, targetId) {
   try {
-    await fetch(`http://127.0.0.1:${cdpPort}/json/close/${targetId}`);
+    const endpoint = `http://127.0.0.1:${cdpPort}/json/close/${targetId}`;
+    let res = await fetch(endpoint, { method: 'PUT' });
+    if (res.status === 405) {
+      await fetch(endpoint);
+    }
   } catch (_) { /* best effort */ }
 }
 
