@@ -38,8 +38,9 @@ const LOCAL_AI_CONFIG = loadLocalAiConfig();
 const API_KEY = process.env.OPENAI_API_KEY || LOCAL_AI_CONFIG.apiKey || '';
 const BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.deepseek.com';
 const MODEL = process.env.OPENAI_MODEL || 'deepseek-chat';
-// 多模态端点路径（含图片时使用），需测试确认具体路径
-const MULTIMODAL_PATH = process.env.OPENAI_MULTIMODAL_PATH || '/chat/completions';
+// 多模态端点路径（含图片时使用）。未配置时图片降级为 [图片] 占位符。
+// 设置后启用 image_url 格式，如: OPENAI_MULTIMODAL_PATH=/v3/multimodal/chat/completions
+const MULTIMODAL_PATH = process.env.OPENAI_MULTIMODAL_PATH || '';
 
 const SIZE_RECOMMENDATION_RULES = Object.freeze({
     size_chart_type: 'recommendation_by_weight',
@@ -162,24 +163,31 @@ async function generateReply(chatHistory, productInfo = {}) {
     // Map chat history to OpenAI format
     // buyer → user, seller → assistant
     const recent = chatHistory.slice(-10); // last 10 messages
+    const hasImages = recent.some(m => (m.type || 'text') === 'image');
+    const useMultimodal = hasImages && MULTIMODAL_PATH; // 仅当配置了多模态端点时才用 image_url 格式
+
     for (const msg of recent) {
         const role = msg.role === 'buyer' ? 'user' : 'assistant';
         if ((msg.type || 'text') === 'image') {
-            // 图片消息：传递图片URL供多模态模型理解
-            messages.push({
-                role,
-                content: [
-                    { type: 'image_url', image_url: { url: msg.content } },
-                ],
-            });
+            if (useMultimodal) {
+                // 多模态端点已配置：传递图片URL
+                messages.push({
+                    role,
+                    content: [
+                        { type: 'image_url', image_url: { url: msg.content } },
+                    ],
+                });
+            } else {
+                // 未配置多模态端点：降级为占位符
+                messages.push({ role, content: '[图片]' });
+            }
         } else {
             messages.push({ role, content: msg.content });
         }
     }
 
-    // Call API — 含图片时切换到多模态端点
-    const hasImages = recent.some(m => (m.type || 'text') === 'image');
-    const apiPath = hasImages ? MULTIMODAL_PATH : '/v1/chat/completions';
+    // Call API
+    const apiPath = useMultimodal ? MULTIMODAL_PATH : '/v1/chat/completions';
     const url = `${BASE_URL.replace(/\/$/, '')}${apiPath}`;
     const resp = await fetch(url, {
         method: 'POST',
