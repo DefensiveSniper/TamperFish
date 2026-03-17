@@ -576,19 +576,23 @@ async function startServer() {
   await bootstrapSettings();
   startBrowserWssServer();
 
-  // 初始化 Kafka producer（consumer 由 worker 启动）
-  try {
-    const { getProducer } = require('./kafka');
-    await getProducer();
-    console.log('[server] Kafka producer ready');
-  } catch (kafkaErr) {
-    console.warn('[server] Kafka producer init failed, outbox events will only be saved to SQLite:', kafkaErr.message);
-  }
-
   app.listen(PORT, () => {
     console.log(`[server] http://localhost:${PORT}`);
-    startAutoReplyWorker({});
   });
+
+  // Kafka 初始化不阻塞 HTTP 服务启动
+  (async () => {
+    try {
+      const { getProducer } = require('./kafka');
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Kafka connect timeout (5s)')), 5000));
+      await Promise.race([getProducer(), timeout]);
+      console.log('[server] Kafka producer ready');
+    } catch (kafkaErr) {
+      console.warn('[server] Kafka producer init failed, outbox events will only be saved to SQLite:', kafkaErr.message);
+    }
+    // Worker 在 Kafka 之后启动（无论成功与否）
+    startAutoReplyWorker({});
+  })();
 }
 
 startServer().catch((err) => {

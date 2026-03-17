@@ -142,8 +142,16 @@ async function startAutoReplyWorker({ dryRun = false, once = false } = {}) {
     log('worker', `  ONCE:     ${once}`);
 
     consumer = createConsumer(CONSUMER_GROUP);
-    await consumer.connect();
-    log('worker', 'Consumer connected');
+    try {
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Kafka consumer connect timeout (10s)')), 10000));
+        await Promise.race([consumer.connect(), timeout]);
+        log('worker', 'Consumer connected');
+    } catch (err) {
+        log('error', `Kafka consumer 连接失败: ${err.message}. Worker 未启动。`);
+        running = false;
+        consumer = null;
+        return;
+    }
 
     await consumer.subscribe({ topic: TOPICS.OUTBOX, fromBeginning: false });
 
