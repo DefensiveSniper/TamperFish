@@ -812,16 +812,25 @@ async function ingest(sessions) {
       }
 
       if (newMsgCount > 0) {
+        const outboxPayload = {
+          chatKey: canonicalChatKey,
+          sessionId: normalizedSessionId,
+          newMessages,
+        };
+        // SQLite outbox (审计/兼容)
         await db.run(
           `INSERT INTO outbox(event_type, chat_key, payload)
            VALUES('new_messages', ?, ?)`,
           canonicalChatKey,
-          JSON.stringify({
-            chatKey: canonicalChatKey,
-            sessionId: normalizedSessionId,
-            newMessages,
-          })
+          JSON.stringify(outboxPayload)
         );
+        // Kafka 事件发布（异步，不阻塞 ingest 事务）
+        try {
+          const { publishEvent, TOPICS } = require('./kafka');
+          await publishEvent(TOPICS.OUTBOX, canonicalChatKey, outboxPayload);
+        } catch (kafkaErr) {
+          console.warn(`[db] Kafka publish failed for ${canonicalChatKey}, outbox still saved:`, kafkaErr.message);
+        }
       }
 
       results[chatKey] = {

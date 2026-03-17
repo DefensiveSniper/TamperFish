@@ -38,6 +38,8 @@ const LOCAL_AI_CONFIG = loadLocalAiConfig();
 const API_KEY = process.env.OPENAI_API_KEY || LOCAL_AI_CONFIG.apiKey || '';
 const BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.deepseek.com';
 const MODEL = process.env.OPENAI_MODEL || 'deepseek-chat';
+// 多模态端点路径（含图片时使用），需测试确认具体路径
+const MULTIMODAL_PATH = process.env.OPENAI_MULTIMODAL_PATH || '/chat/completions';
 
 const SIZE_RECOMMENDATION_RULES = Object.freeze({
     size_chart_type: 'recommendation_by_weight',
@@ -175,8 +177,10 @@ async function generateReply(chatHistory, productInfo = {}) {
         }
     }
 
-    // Call API
-    const url = `${BASE_URL.replace(/\/$/, '')}/v1/chat/completions`;
+    // Call API — 含图片时切换到多模态端点
+    const hasImages = recent.some(m => (m.type || 'text') === 'image');
+    const apiPath = hasImages ? MULTIMODAL_PATH : '/v1/chat/completions';
+    const url = `${BASE_URL.replace(/\/$/, '')}${apiPath}`;
     const resp = await fetch(url, {
         method: 'POST',
         headers: {

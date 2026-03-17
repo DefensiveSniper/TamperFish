@@ -576,10 +576,18 @@ async function startServer() {
   await bootstrapSettings();
   startBrowserWssServer();
 
+  // 初始化 Kafka producer（consumer 由 worker 启动）
+  try {
+    const { getProducer } = require('./kafka');
+    await getProducer();
+    console.log('[server] Kafka producer ready');
+  } catch (kafkaErr) {
+    console.warn('[server] Kafka producer init failed, outbox events will only be saved to SQLite:', kafkaErr.message);
+  }
+
   app.listen(PORT, () => {
     console.log(`[server] http://localhost:${PORT}`);
-    const intervalMs = parseInt(process.env.AUTO_REPLY_INTERVAL_MS || '3000', 10);
-    startAutoReplyWorker({ intervalMs });
+    startAutoReplyWorker({});
   });
 }
 
