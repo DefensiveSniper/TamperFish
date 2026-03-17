@@ -564,6 +564,14 @@
       border: 1px solid var(--border);
     }
 
+    .bub img.chat-img {
+      max-width: 100%;
+      max-height: 240px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: block;
+    }
+
     #chat-empty {
       flex: 1;
       display: flex;
@@ -2449,9 +2457,12 @@
           const side = m.is_me ? 'me' : 'them';
           const label = m.is_me ? '我' : esc(session.customer_name);
           const motionStyle = animateMessages ? `animation-delay:${i * 20}ms` : 'animation:none';
+          const bubContent = m.type === 'image'
+            ? `<img class="chat-img" src="${esc(m.content)}" alt="图片" onclick="window.open(this.src,'_blank')">`
+            : esc(m.content);
           return `<div class="mr ${side}" style="${motionStyle}">
             <div class="ml">${label}</div>
-            <div class="bub">${esc(m.content)}</div>
+            <div class="bub">${bubContent}</div>
           </div>`;
         }).join('')
         : '<div style="text-align:center;color:var(--muted);margin-top:40px;font-size:13px">暂无消息</div>';
