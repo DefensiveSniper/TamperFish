@@ -113,7 +113,7 @@ function buildSizeRecommendationPrompt(ruleConfig) {
 function shouldInjectSizeRecommendation(chatHistory = []) {
     const recentBuyerMessage = [...chatHistory]
         .reverse()
-        .find(message => message.role === 'buyer' && message.content);
+        .find(message => message.role === 'buyer' && message.content && (message.type || 'text') === 'text');
     if (!recentBuyerMessage) {
         return false;
     }
@@ -161,10 +161,18 @@ async function generateReply(chatHistory, productInfo = {}) {
     // buyer → user, seller → assistant
     const recent = chatHistory.slice(-10); // last 10 messages
     for (const msg of recent) {
-        messages.push({
-            role: msg.role === 'buyer' ? 'user' : 'assistant',
-            content: msg.content,
-        });
+        const role = msg.role === 'buyer' ? 'user' : 'assistant';
+        if ((msg.type || 'text') === 'image') {
+            // 图片消息：传递图片URL供多模态模型理解
+            messages.push({
+                role,
+                content: [
+                    { type: 'image_url', image_url: { url: msg.content } },
+                ],
+            });
+        } else {
+            messages.push({ role, content: msg.content });
+        }
     }
 
     // Call API
