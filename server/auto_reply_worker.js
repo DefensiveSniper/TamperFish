@@ -120,68 +120,103 @@ async function startKafkaWorker({ dryRun, once }) {
         return false; // 降级信号
     }
 
-    await consumer.subscribe({ topic: TOPICS.OUTBOX, fromBeginning: false });
+    // 防止 consumer crash 事件杀掉 Node 进程
+    consumer.on('consumer.crash', ({ payload: { error, groupId } }) => {
+        log('error', `Kafka consumer crash (group=${groupId}): ${error.message}`);
+        log('worker', '将在下次重启时重新连接 Kafka，当前不影响 SQLite 轮询。');
+    });
 
-    await consumer.run({
-        partitionsConsumedConcurrently: 3,
-        eachMessage: async ({ message, heartbeat }) => {
-            if (!running) return;
+    // 确保 topic 存在（auto.create.topics.enable 仅在 producer send 时触发）
+    try {
+        await publishEvent(TOPICS.OUTBOX, '__init__', { type: 'init', ts: Date.now() });
+        log('worker', 'Topic 初始化消息已发送');
+    } catch (initErr) {
+        log('error', `Topic 初始化失败: ${initErr.message}. 降级到 SQLite 轮询模式。`);
+        try { await consumer.disconnect(); } catch (_) {}
+        consumer = null;
+        return false;
+    }
 
-            const chatKey = message.key?.toString() || 'unknown';
-            const retryCount = parseInt(message.headers?.retryCount?.toString() || '0', 10);
+    try {
+        await consumer.subscribe({ topic: TOPICS.OUTBOX, fromBeginning: false });
+    } catch (subErr) {
+        log('error', `Kafka subscribe 失败: ${subErr.message}. 降级到 SQLite 轮询模式。`);
+        try { await consumer.disconnect(); } catch (_) {}
+        consumer = null;
+        return false;
+    }
 
-            let payloadData;
-            try {
-                payloadData = JSON.parse(message.value.toString());
-            } catch (parseErr) {
-                log('error', `${chatKey}: 无法解析消息载荷: ${parseErr.message}`);
-                return;
-            }
+    try {
+        await consumer.run({
+            partitionsConsumedConcurrently: 3,
+            eachMessage: async ({ message, heartbeat }) => {
+                if (!running) return;
 
-            try {
-                await processEvent({ chatKey, payloadData, dryRun });
+                const chatKey = message.key?.toString() || 'unknown';
 
-                // 同步标记 SQLite outbox（best-effort）
+                // 跳过初始化消息
+                if (chatKey === '__init__') return;
+
+                const retryCount = parseInt(message.headers?.retryCount?.toString() || '0', 10);
+
+                let payloadData;
                 try {
-                    const outboxEvents = await db.getUnprocessedOutbox('new_messages', 100);
-                    const match = outboxEvents.find(e => {
+                    payloadData = JSON.parse(message.value.toString());
+                } catch (parseErr) {
+                    log('error', `${chatKey}: 无法解析消息载荷: ${parseErr.message}`);
+                    return;
+                }
+
+                try {
+                    await processEvent({ chatKey, payloadData, dryRun });
+
+                    // 同步标记 SQLite outbox（best-effort）
+                    try {
+                        const outboxEvents = await db.getUnprocessedOutbox('new_messages', 100);
+                        const match = outboxEvents.find(e => {
+                            try {
+                                const p = JSON.parse(e.payload || '{}');
+                                return p.chatKey === chatKey;
+                            } catch { return false; }
+                        });
+                        if (match) await db.markOutboxProcessed(match.id);
+                    } catch (_) { /* best-effort */ }
+
+                    await heartbeat();
+                } catch (err) {
+                    log('error', `${chatKey}: 处理失败 (retry ${retryCount}/${MAX_RETRIES}) — ${err.message}`);
+
+                    if (retryCount >= MAX_RETRIES) {
+                        log('dlq', `${chatKey}: 超过 ${MAX_RETRIES} 次重试，移入 DLQ`);
                         try {
-                            const p = JSON.parse(e.payload || '{}');
-                            return p.chatKey === chatKey;
-                        } catch { return false; }
-                    });
-                    if (match) await db.markOutboxProcessed(match.id);
-                } catch (_) { /* best-effort */ }
-
-                await heartbeat();
-            } catch (err) {
-                log('error', `${chatKey}: 处理失败 (retry ${retryCount}/${MAX_RETRIES}) — ${err.message}`);
-
-                if (retryCount >= MAX_RETRIES) {
-                    log('dlq', `${chatKey}: 超过 ${MAX_RETRIES} 次重试，移入 DLQ`);
-                    try {
-                        await publishEvent(TOPICS.DLQ, chatKey, {
-                            ...payloadData,
-                            error: err.message,
-                            failedAt: new Date().toISOString(),
-                            retryCount,
-                        });
-                    } catch (dlqErr) {
-                        log('error', `${chatKey}: DLQ 发布失败: ${dlqErr.message}`);
-                    }
-                } else {
-                    try {
-                        await publishEvent(TOPICS.OUTBOX, chatKey, payloadData, {
-                            retryCount: String(retryCount + 1),
-                        });
-                        log('retry', `${chatKey}: 重新入队 (retry ${retryCount + 1})`);
-                    } catch (repubErr) {
-                        log('error', `${chatKey}: 重新入队失败: ${repubErr.message}`);
+                            await publishEvent(TOPICS.DLQ, chatKey, {
+                                ...payloadData,
+                                error: err.message,
+                                failedAt: new Date().toISOString(),
+                                retryCount,
+                            });
+                        } catch (dlqErr) {
+                            log('error', `${chatKey}: DLQ 发布失败: ${dlqErr.message}`);
+                        }
+                    } else {
+                        try {
+                            await publishEvent(TOPICS.OUTBOX, chatKey, payloadData, {
+                                retryCount: String(retryCount + 1),
+                            });
+                            log('retry', `${chatKey}: 重新入队 (retry ${retryCount + 1})`);
+                        } catch (repubErr) {
+                            log('error', `${chatKey}: 重新入队失败: ${repubErr.message}`);
+                        }
                     }
                 }
-            }
-        },
-    });
+            },
+        });
+    } catch (runErr) {
+        log('error', `Kafka consumer.run 失败: ${runErr.message}. 降级到 SQLite 轮询模式。`);
+        try { await consumer.disconnect(); } catch (_) {}
+        consumer = null;
+        return false;
+    }
 
     if (once) {
         await sleep(5000);
