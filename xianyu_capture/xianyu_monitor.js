@@ -16,7 +16,7 @@
 
     // --- 用户配置区 (User Configuration) ---
     const CONFIG = {
-        userName: "我的头好大",
+        userName: "你的头真大",  // 从页面 header 提取的当前用户昵称
 
         // 自动抓取配置
         autoCrawl: true,
@@ -53,7 +53,8 @@
             myMessage: '.message-text-right--Vhy6k0cY',
             theirMessage: '.message-text-left--Wvuv8NsL',
             messageText: '.message-text--zV88pB7N',
-            messageNode: '[class*="message-text-right--"], [class*="message-text-left--"]'
+            messageNode: '[class*="message-row--"]',
+            imageContainer: '[class*="image-container--"]'
         }
     };
     // ------------------------------------
@@ -384,8 +385,8 @@
 
     /**
      * 判断两组消息是否为同一条会话快照。
-     * @param {{content: string, isMe: boolean}[]} left - 左侧消息列表。
-     * @param {{content: string, isMe: boolean}[]} right - 右侧消息列表。
+     * @param {{content: string, isMe: boolean, type?: string}[]} left
+     * @param {{content: string, isMe: boolean, type?: string}[]} right
      * @returns {boolean} 是否逐条完全一致。
      */
     function areMessagesEquivalent(left = [], right = []) {
@@ -393,6 +394,7 @@
         for (let i = 0; i < left.length; i++) {
             if ((left[i]?.content || '') !== (right[i]?.content || '')) return false;
             if (!!left[i]?.isMe !== !!right[i]?.isMe) return false;
+            if ((left[i]?.type || 'text') !== (right[i]?.type || 'text')) return false;
         }
         return true;
     }
@@ -1529,10 +1531,26 @@
             const messageNodes = getRenderedMessageNodes(main);
 
             messageNodes.forEach(el => {
-                const content = el.innerText.trim();
-                if (!content) return;
-                const isMe = el.className.includes('message-text-right');
-                messages.push({ content: content, isMe: isMe });
+                const imgContainer = el.querySelector(CONFIG.selectors.imageContainer);
+                if (imgContainer) {
+                    // 图片消息：优先取 ant-image-img（原图URL），其次取容器内第一个 img
+                    const origImg = imgContainer.querySelector('.ant-image-img');
+                    const fallbackImg = imgContainer.querySelector('img');
+                    const imgSrc = (origImg && origImg.src) || (fallbackImg && fallbackImg.src) || '';
+                    if (!imgSrc) return;
+                    // 方向判断：检查 flex 列容器的 align-items
+                    const flexCol = el.querySelector('div[style*="flex-direction: column"]');
+                    const isMe = flexCol ? flexCol.style.alignItems === 'flex-end' : false;
+                    messages.push({ content: imgSrc, isMe, type: 'image' });
+                    return;
+                }
+                const textNode = el.querySelector('[class*="message-text--"]');
+                if (textNode) {
+                    const content = textNode.innerText.trim();
+                    if (!content) return;
+                    const isMe = textNode.className.includes('message-text-right');
+                    messages.push({ content, isMe, type: 'text' });
+                }
             });
 
             const canonicalChatKey = findCanonicalChatKey(customerName, messages);
@@ -1997,6 +2015,18 @@
 
     function init() {
         console.log('[XM] Starting...');
+
+        // 自动从页面 header 提取当前用户昵称
+        if (!CONFIG.userName) {
+            const nickEl = document.querySelector('a[href*="/personal"] .nick--RyNYtDXM, a[href*="/personal"] div[class*="nick--"]');
+            if (nickEl) {
+                CONFIG.userName = nickEl.textContent.trim();
+                console.log(`[XM] Auto-detected userName: ${CONFIG.userName}`);
+            } else {
+                console.warn('[XM] Failed to auto-detect userName from header, customerName extraction may be inaccurate.');
+            }
+        }
+
         connectBrowserApiSocket().catch((error) => {
             console.warn('[XM] browser api socket init failed:', error.message || error);
         });

@@ -92,6 +92,7 @@ async function processOutbox({ dryRun = false } = {}) {
         const chatHistory = allMessages.map(m => ({
             role: m.is_me ? 'seller' : 'buyer',
             content: m.content,
+            type: m.type || 'text',
         }));
 
         // ── Get product info ──
