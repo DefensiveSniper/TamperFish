@@ -142,19 +142,24 @@ npm run worker:dry:once
 
 ## 浏览器端配置
 
-### 1. 安装并启用 Tampermonkey
+### 1. 启动器自动注入 Tampermonkey 与脚本
 
-在 Chrome 中安装 Tampermonkey 扩展。
+默认使用项目内置 Chrome profile 或 fresh profile 时，启动器会自动完成以下动作：
 
-### 2. 导入油猴脚本
+- 通过项目内置的 unpacked Tampermonkey 扩展拉起浏览器
+- 在 fresh profile 中自动写入并启用以下脚本：
+  - [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
+  - [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
+- 为脚本注入本地更新地址：
+  - `http://localhost:3210/scripts/xianyu_monitor.user.js`
+  - `http://localhost:3210/scripts/qianniu_batch_consign.user.js`
 
-导入并启用：
+当前闲鱼脚本面板版本为 `4.1`，千牛订单脚本版本为 `1.5`。
+千牛订单脚本首次运行时，如 Tampermonkey 提示授权 `trade.taobao.com`，请允许访问，用于抓取 `tradeSnap` 页面中的商品 ID。
 
-- [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
-- [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
+### 2. 手工导入仅作为兜底
 
-当前闲鱼脚本面板版本为 `4.0`，千牛订单脚本版本为 `1.4`。每次脚本更新后，请确认 Tampermonkey 中版本文案也同步更新。
-千牛订单脚本首次导入后，请允许脚本访问 `trade.taobao.com`，用于抓取 `tradeSnap` 页面中的商品 ID。
+如果你改用外部已有 Chrome profile，且该 profile 中既没有已安装的 Tampermonkey，也没有项目脚本，再手工导入上述两个脚本即可。
 
 当前脚本与本地服务的控制链路不再依赖高频 HTTP 轮询，而是走单条长连接：
 
