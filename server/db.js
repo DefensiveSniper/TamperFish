@@ -179,6 +179,7 @@ async function migrateSchema(db) {
     `ALTER TABLE orders ADD COLUMN paid_at INTEGER`,
     `ALTER TABLE orders ADD COLUMN latest_ship_at INTEGER`,
     `ALTER TABLE orders ADD COLUMN last_seen_at INTEGER`,
+    `ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'`,
   ];
   for (const sql of additions) {
     try { await db.run(sql); } catch (_) { /* column already exists */ }
@@ -738,7 +739,7 @@ async function ingest(sessions) {
         );
       }
 
-      const dbMsgs = await db.all('SELECT content, is_me, seq FROM messages WHERE chat_key = ? ORDER BY seq ASC', canonicalChatKey);
+      const dbMsgs = await db.all('SELECT content, is_me, seq, type FROM messages WHERE chat_key = ? ORDER BY seq ASC', canonicalChatKey);
 
       let newMsgCount = 0;
       const newMessages = [];
@@ -752,7 +753,8 @@ async function ingest(sessions) {
             let match = true;
             for (let j = 0; j < messages.length; j++) {
               if (dbMsgs[start + j].content !== messages[j].content ||
-                dbMsgs[start + j].is_me !== (messages[j].isMe ? 1 : 0)) {
+                dbMsgs[start + j].is_me !== (messages[j].isMe ? 1 : 0) ||
+                (dbMsgs[start + j].type || 'text') !== (messages[j].type || 'text')) {
                 match = false;
                 break;
               }
@@ -774,7 +776,8 @@ async function ingest(sessions) {
             for (let j = 0; j < i; j++) {
               const dbMsg = dbMsgs[dbMsgs.length - i + j];
               const inMsg = messages[j];
-              if (dbMsg.content !== inMsg.content || dbMsg.is_me !== (inMsg.isMe ? 1 : 0)) {
+              if (dbMsg.content !== inMsg.content || dbMsg.is_me !== (inMsg.isMe ? 1 : 0) ||
+                (dbMsg.type || 'text') !== (inMsg.type || 'text')) {
                 match = false;
                 break;
               }
@@ -788,20 +791,20 @@ async function ingest(sessions) {
           // 3. Append the remaining incoming messages
           const crypto = require('crypto');
           for (let i = overlapLen; i < messages.length; i++) {
-            const { content, isMe } = messages[i];
+            const { content, isMe, type = 'text' } = messages[i];
             if (!content) continue;
 
-            const hash = crypto.createHash('md5').update(`v3:${chatKey}:${isMe ? 1 : 0}:${content}:${currentSeq}`).digest('hex');
+            const hash = crypto.createHash('md5').update(`v3:${chatKey}:${isMe ? 1 : 0}:${type}:${content}:${currentSeq}`).digest('hex');
 
             const result = await db.run(
-              `INSERT OR IGNORE INTO messages(chat_key, msg_hash, seq, content, is_me)
-               VALUES(?, ?, ?, ?, ?)`,
-              canonicalChatKey, hash, currentSeq, content, isMe ? 1 : 0
+              `INSERT OR IGNORE INTO messages(chat_key, msg_hash, seq, content, is_me, type)
+               VALUES(?, ?, ?, ?, ?, ?)`,
+              canonicalChatKey, hash, currentSeq, content, isMe ? 1 : 0, type
             );
 
             if (result.changes > 0) {
               newMsgCount++;
-              newMessages.push({ seq: currentSeq, content, isMe });
+              newMessages.push({ seq: currentSeq, content, isMe, type });
               currentSeq++;
             }
           }
@@ -809,16 +812,25 @@ async function ingest(sessions) {
       }
 
       if (newMsgCount > 0) {
+        const outboxPayload = {
+          chatKey: canonicalChatKey,
+          sessionId: normalizedSessionId,
+          newMessages,
+        };
+        // SQLite outbox (审计/兼容)
         await db.run(
           `INSERT INTO outbox(event_type, chat_key, payload)
            VALUES('new_messages', ?, ?)`,
           canonicalChatKey,
-          JSON.stringify({
-            chatKey: canonicalChatKey,
-            sessionId: normalizedSessionId,
-            newMessages,
-          })
+          JSON.stringify(outboxPayload)
         );
+        // Kafka 事件发布（异步，不阻塞 ingest 事务）
+        try {
+          const { publishEvent, TOPICS } = require('./kafka');
+          await publishEvent(TOPICS.OUTBOX, canonicalChatKey, outboxPayload);
+        } catch (kafkaErr) {
+          console.warn(`[db] Kafka publish failed for ${canonicalChatKey}, outbox still saved:`, kafkaErr.message);
+        }
       }
 
       results[chatKey] = {
@@ -886,7 +898,7 @@ async function getSessionBySessionId(sessionId) {
 async function getMessages(chatKey) {
   const db = await getDb();
   return db.all(
-    'SELECT seq, content, is_me, ingested_at FROM messages WHERE chat_key = ? ORDER BY seq ASC',
+    'SELECT seq, content, is_me, type, ingested_at FROM messages WHERE chat_key = ? ORDER BY seq ASC',
     chatKey
   );
 }

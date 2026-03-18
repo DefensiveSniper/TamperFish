@@ -38,6 +38,9 @@ const LOCAL_AI_CONFIG = loadLocalAiConfig();
 const API_KEY = process.env.OPENAI_API_KEY || LOCAL_AI_CONFIG.apiKey || '';
 const BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.deepseek.com';
 const MODEL = process.env.OPENAI_MODEL || 'deepseek-chat';
+// 多模态端点路径（含图片时使用）。未配置时图片降级为 [图片] 占位符。
+// 设置后启用 image_url 格式，如: OPENAI_MULTIMODAL_PATH=/v3/multimodal/chat/completions
+const MULTIMODAL_PATH = process.env.OPENAI_MULTIMODAL_PATH || '';
 
 const SIZE_RECOMMENDATION_RULES = Object.freeze({
     size_chart_type: 'recommendation_by_weight',
@@ -113,7 +116,7 @@ function buildSizeRecommendationPrompt(ruleConfig) {
 function shouldInjectSizeRecommendation(chatHistory = []) {
     const recentBuyerMessage = [...chatHistory]
         .reverse()
-        .find(message => message.role === 'buyer' && message.content);
+        .find(message => message.role === 'buyer' && message.content && (message.type || 'text') === 'text');
     if (!recentBuyerMessage) {
         return false;
     }
@@ -160,15 +163,32 @@ async function generateReply(chatHistory, productInfo = {}) {
     // Map chat history to OpenAI format
     // buyer → user, seller → assistant
     const recent = chatHistory.slice(-10); // last 10 messages
+    const hasImages = recent.some(m => (m.type || 'text') === 'image');
+    const useMultimodal = hasImages && MULTIMODAL_PATH; // 仅当配置了多模态端点时才用 image_url 格式
+
     for (const msg of recent) {
-        messages.push({
-            role: msg.role === 'buyer' ? 'user' : 'assistant',
-            content: msg.content,
-        });
+        const role = msg.role === 'buyer' ? 'user' : 'assistant';
+        if ((msg.type || 'text') === 'image') {
+            if (useMultimodal) {
+                // 多模态端点已配置：传递图片URL
+                messages.push({
+                    role,
+                    content: [
+                        { type: 'image_url', image_url: { url: msg.content } },
+                    ],
+                });
+            } else {
+                // 未配置多模态端点：降级为占位符
+                messages.push({ role, content: '[图片]' });
+            }
+        } else {
+            messages.push({ role, content: msg.content });
+        }
     }
 
     // Call API
-    const url = `${BASE_URL.replace(/\/$/, '')}/v1/chat/completions`;
+    const apiPath = useMultimodal ? MULTIMODAL_PATH : '/v1/chat/completions';
+    const url = `${BASE_URL.replace(/\/$/, '')}${apiPath}`;
     const resp = await fetch(url, {
         method: 'POST',
         headers: {

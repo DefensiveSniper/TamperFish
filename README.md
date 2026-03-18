@@ -24,7 +24,10 @@ This repository is a local aggregation, manual takeover, and auto-reply toolkit 
 - Startup initialization: after the project starts, it initializes session history sync with a limit of `30` sessions by default
 - Unread monitoring: after initialization, continuous patrol is disabled by default and new messages are synced incrementally based on unread badges in the left-side session list
 - Precise sending: the browser script actively claims outgoing jobs and prioritizes locating the target conversation by `session_id` before sending
+- Image messages: both text and image messages are captured from the chat DOM, stored with a `type` field (`text` | `image`), and rendered as actual images in the console
+- Kafka message queue: when Kafka is available, the auto-reply worker consumes events from Kafka with independent message handling, retry limits, and a dead-letter queue (DLQ); when Kafka is unavailable, it gracefully degrades to SQLite polling
 - Auto-reply: the worker consumes `outbox.new_messages`, generates replies, and writes them into `outgoing_messages`
+- Multimodal LLM: when `OPENAI_MULTIMODAL_PATH` is configured, image messages are sent to the LLM with `image_url` format; otherwise they are replaced with a `[图片]` placeholder
 - Project Chrome: `npm start` automatically launches a project-dedicated Chrome instance with remote debugging on port `18800`
 - Chrome proxy: supports configuring a dedicated proxy for the project Chrome instance through a local config file or environment variables
 - Log persistence: startup flow, Chrome, `sync.js`, the API, and the built-in worker all write logs to files
@@ -43,12 +46,14 @@ goofishAggregation/
 │   ├── index.js                 # Express API + local UI
 │   ├── db.js                    # SQLite data layer
 │   ├── sync.js                  # CDP sync daemon
-│   ├── auto_reply_worker.js     # Auto-reply worker
-│   ├── ai.js                    # LLM integration wrapper
+│   ├── auto_reply_worker.js     # Auto-reply worker (dual-mode: Kafka / SQLite polling)
+│   ├── ai.js                    # LLM integration wrapper (text + optional multimodal)
+│   ├── kafka.js                 # KafkaJS producer/consumer wrapper (optional dependency)
 │   ├── public/                  # Static assets for the 3210 console
 │   ├── data.db                  # [generated] SQLite database
 │   ├── server.log               # [generated] launcher / Chrome / sync combined log
 │   └── server3210.log           # [generated] API and built-in worker log
+├── docker-compose.yml             # Kafka single-node (KRaft, no Zookeeper)
 ├── integrations/
 │   └── qianniu/                 # Reserved for future integrations
 └── agent_logs/                  # Collaboration logs
@@ -60,6 +65,7 @@ goofishAggregation/
 - Desktop Google Chrome
 - Tampermonkey extension
 - A logged-in Goofish Web session at `https://www.goofish.com/im`
+- Docker (optional, for Kafka message queue — the system works without it)
 
 ## Install Dependencies
 
@@ -209,6 +215,7 @@ The current UI supports:
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
+- `OPENAI_MULTIMODAL_PATH`: API path for multimodal (image) requests, e.g. `/v3/multimodal/chat/completions`; leave empty to disable and fall back to `[图片]` placeholder
 - `AUTO_REPLY_ENABLED`
 - `AUTO_REPLY_INTERVAL_MS`
 
@@ -216,6 +223,19 @@ Current behavior:
 
 - `AUTO_REPLY_ENABLED=0` initializes the runtime AI toggle as disabled
 - The built-in worker still starts, but skips auto-reply generation
+
+### Kafka (Optional)
+
+- `KAFKA_BROKERS`: Kafka broker addresses, comma-separated (default `localhost:9092`)
+- `KAFKA_CLIENT_ID`: Kafka client identifier (default `goofish-server`)
+
+To start Kafka:
+
+```bash
+docker compose up -d
+```
+
+If Kafka is not running or `kafkajs` is not installed, the worker automatically falls back to SQLite polling.
 
 ### Chrome / Launcher
 
@@ -295,8 +315,8 @@ Core tables:
 
 The current sending pipeline is:
 
-1. New messages enter `outbox`
-2. The worker generates a reply and writes it to `outgoing_messages.pending`
+1. New messages enter both the SQLite `outbox` and the Kafka `outbox-events` topic (when Kafka is available)
+2. The worker consumes events from Kafka (preferred) or polls the SQLite outbox (fallback), generates a reply, and writes it to `outgoing_messages.pending`; failed messages are retried up to 3 times before being moved to the `outbox-events-dlq` dead-letter topic
 3. The browser sender loop atomically claims one outgoing job
 4. It first tries to locate the target session precisely by `session_id`; if that fails, it performs a limited fallback traversal and backfill
 5. The browser automatically fills the input and sends the message
@@ -341,7 +361,7 @@ CHROME_PROXY_DISABLED=1 npm start
 
 - The launcher currently supports only one project Chrome instance, so it cannot safely aggregate multiple seller accounts into the same `3210` console yet
 - `server/ai.js` still keeps a default API key fallback, which is not recommended for production use
-- `outbox` events are currently processed and marked afterward, so running multiple workers at the same time may cause duplicate consumption
+- In SQLite fallback mode, `outbox` events are processed and marked afterward, so running multiple workers at the same time may cause duplicate consumption; use Kafka mode for safe concurrent consumption
 - Precise sending still depends on `sessionInfo.sessionId` being readable inside the Goofish page; if the page structure changes, it falls back to limited traversal and backfill
 
 ## Next Development Plan

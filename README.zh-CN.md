@@ -24,7 +24,10 @@
 - 启动初始化：项目启动后会先限量初始化同步会话历史，默认拉前 `30` 个会话
 - 未读监听：初始化完成后默认关闭自动巡逻，改为根据左侧未读角标增量同步新消息
 - 精准发送：浏览器脚本会主动 claim 待发任务，并优先按 `session_id` 定位目标会话后发送
+- 图片消息：同时采集文本和图片消息，带 `type` 字段（`text` | `image`），控制台中直接渲染图片
+- Kafka 消息队列：Kafka 可用时 worker 通过 Kafka 消费事件，支持独立消息处理、重试上限和死信队列（DLQ）；Kafka 不可用时自动降级为 SQLite 轮询
 - 自动回复：Worker 消费 `outbox.new_messages`，生成回复后写入 `outgoing_messages`
+- 多模态 LLM：配置 `OPENAI_MULTIMODAL_PATH` 后图片消息以 `image_url` 格式发送给 LLM；未配置时降级为 `[图片]` 占位符
 - 项目专用 Chrome：`npm start` 会自动拉起带 `18800` 调试端口的项目 Chrome
 - Chrome 代理：支持通过本地配置文件或环境变量给项目 Chrome 单独配置代理
 - 日志落盘：启动链路、Chrome、`sync.js`、API 和内置 worker 都会写入日志文件
@@ -43,12 +46,14 @@ goofishAggregation/
 │   ├── index.js                # Express API + 本地 UI
 │   ├── db.js                   # SQLite 数据层
 │   ├── sync.js                 # CDP 同步守护进程
-│   ├── auto_reply_worker.js    # 自动回复 worker
-│   ├── ai.js                   # LLM 调用封装
+│   ├── auto_reply_worker.js    # 自动回复 worker（双模式：Kafka / SQLite 轮询）
+│   ├── ai.js                   # LLM 调用封装（文本 + 可选多模态）
+│   ├── kafka.js                # KafkaJS producer/consumer 封装（可选依赖）
 │   ├── public/                 # 3210 控制台静态资源
 │   ├── data.db                 # [自动生成] SQLite 数据库
 │   ├── server.log              # [自动生成] 启动器 / Chrome / sync 综合日志
 │   └── server3210.log          # [自动生成] API 与内置 worker 日志
+├── docker-compose.yml            # Kafka 单节点（KRaft 模式，无需 Zookeeper）
 ├── integrations/
 │   └── qianniu/                # 预留扩展
 └── agent_logs/                 # 协作日志
@@ -60,6 +65,7 @@ goofishAggregation/
 - 桌面版 Google Chrome
 - Tampermonkey 扩展
 - 已登录的闲鱼网页版 `https://www.goofish.com/im`
+- Docker（可选，用于 Kafka 消息队列 — 不装也能正常运行）
 
 ## 安装依赖
 
@@ -209,6 +215,7 @@ npm run worker:dry:once
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
+- `OPENAI_MULTIMODAL_PATH`：多模态（图片）请求的 API 路径，例如 `/v3/multimodal/chat/completions`；留空则禁用，图片降级为 `[图片]` 占位符
 - `AUTO_REPLY_ENABLED`
 - `AUTO_REPLY_INTERVAL_MS`
 
@@ -216,6 +223,19 @@ npm run worker:dry:once
 
 - `AUTO_REPLY_ENABLED=0` 会把运行时 AI 开关初始化为关闭
 - 内置 worker 仍然会启动，但会跳过自动回复生成
+
+### Kafka（可选）
+
+- `KAFKA_BROKERS`：Kafka broker 地址，逗号分隔（默认 `localhost:9092`）
+- `KAFKA_CLIENT_ID`：Kafka 客户端标识（默认 `goofish-server`）
+
+启动 Kafka：
+
+```bash
+docker compose up -d
+```
+
+如果 Kafka 未运行或 `kafkajs` 未安装，worker 会自动降级为 SQLite 轮询模式。
 
 ### Chrome / 启动器相关
 
@@ -295,8 +315,8 @@ npm run worker:dry:once
 
 当前发送链路是：
 
-1. 新消息进入 `outbox`
-2. worker 生成回复，写入 `outgoing_messages.pending`
+1. 新消息同时进入 SQLite `outbox` 和 Kafka `outbox-events` topic（Kafka 可用时）
+2. worker 从 Kafka 消费（优先）或轮询 SQLite outbox（降级），生成回复后写入 `outgoing_messages.pending`；失败消息最多重试 3 次，超限后移入 `outbox-events-dlq` 死信 topic
 3. 浏览器 sender loop 原子 claim 一条待发任务
 4. 优先按 `session_id` 精准定位目标会话；定位失败时再做限次 fallback 遍历补水
 5. 浏览器自动填写并发送
@@ -341,7 +361,7 @@ CHROME_PROXY_DISABLED=1 npm start
 
 - 当前启动器只支持一个项目 Chrome 实例，还不能直接在同一个 `3210` 控制台里安全聚合多个卖家账号
 - `server/ai.js` 目前仍然保留了默认 API key fallback，生产环境不建议继续沿用
-- `outbox` 事件当前是“读后处理、处理完再标记”，如果同时运行多个 worker，存在重复消费风险
+- SQLite 降级模式下 `outbox` 事件是”读后处理、处理完再标记”，如果同时运行多个 worker，存在重复消费风险；使用 Kafka 模式可安全并发消费
 - 当前精准发送仍依赖闲鱼页面内可读取的 `sessionInfo.sessionId`；如果页面结构变化，会退回到限次 fallback 遍历补水
 
 ## 下一步开发计划
