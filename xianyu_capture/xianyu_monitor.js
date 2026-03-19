@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         闲鱼消息监控与导出 (v4.1)
+// @name         闲鱼消息监控与导出 (v4.2)
 // @namespace    http://tampermonkey.net/
-// @version      4.1
+// @version      4.2
 // @description  监控闲鱼网页版消息，支持精准发送、后台巡逻远程控制与数据持久化
 // @author       XiaoWai
 // @match        https://www.goofish.com/im*
@@ -12,11 +12,11 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '4.1';
+    const SCRIPT_VERSION = '4.2';
 
     // --- 用户配置区 (User Configuration) ---
     const CONFIG = {
-        userName: "你的头真大",  // 从页面 header 提取的当前用户昵称
+        userName: "",  // 从页面 header 提取的当前用户昵称
 
         // 自动抓取配置
         autoCrawl: true,
