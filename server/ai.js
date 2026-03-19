@@ -36,8 +36,8 @@ function loadLocalAiConfig() {
 
 const LOCAL_AI_CONFIG = loadLocalAiConfig();
 const API_KEY = process.env.OPENAI_API_KEY || LOCAL_AI_CONFIG.apiKey || '';
-const BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.deepseek.com';
-const MODEL = process.env.OPENAI_MODEL || 'deepseek-chat';
+const BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.vectortara.com';
+const MODEL = process.env.OPENAI_MODEL || 'gpt-5.2';
 
 const SIZE_RECOMMENDATION_RULES = Object.freeze({
     size_chart_type: 'recommendation_by_weight',
