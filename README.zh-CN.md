@@ -16,7 +16,7 @@
 - 会话聚合：前台油猴脚本与后台 CDP 双路采集，消息落地到 SQLite
 - 千牛订单采集：解析 `batch-consign` 订单卡片，落库订单号、买家、商品、金额、数量和收件信息
 - 订单关联：按 `buyer_user_id + product_id` 将千牛订单精准关联到闲鱼会话
-- 本地控制台：在 `http://127.0.0.1:3210` 查看会话、消息、待发队列
+- 本地控制台：React + TypeScript SPA，由 Vite 构建，Express 静态服务于 `http://127.0.0.1:3210`
 - 订单控制台：订单抽屉支持查看脚本运行态、立即同步当前页和手动全量扫描
 - 人工回复：UI 右侧输入框会把消息压入 `pending` 队列，再由浏览器发送
 - AI 开关：UI 顶栏支持全局开启/关闭 AI 自动回复，便于人工接管
@@ -37,15 +37,29 @@ goofishAggregation/
 │   └── qianniu_batch_consign.js # Tampermonkey 脚本：千牛待发货订单采集
 ├── xianyu_capture/
 │   └── xianyu_monitor.js        # Tampermonkey 脚本（当前面板版本 4.0）
+├── frontend/                    # React + TypeScript + Vite 前端源码
+│   ├── package.json             # 前端依赖（React 18、Vite、TypeScript）
+│   ├── vite.config.ts           # Vite 配置：构建输出到 server/public/，开发代理 /api 到 3210
+│   ├── tsconfig.json            # TypeScript 严格模式配置
+│   ├── index.html               # Vite 入口 HTML
+│   └── src/
+│       ├── main.tsx             # ReactDOM 入口
+│       ├── App.tsx              # 顶层布局：Header + Sidebar + ChatPanel + OrdersDrawer + Toast
+│       ├── types/api.ts         # TypeScript 接口定义
+│       ├── services/            # 类型化 API 调用封装（settings、sessions、outgoing、orders）
+│       ├── context/             # AppContext（useReducer）+ usePolling 轮询 hook
+│       ├── hooks/               # useDebouncedValue、useCopyToClipboard、useToast
+│       ├── styles/              # CSS 变量、全局样式、共享按钮样式
+│       └── components/          # Header/、Sidebar/、ChatPanel/、OrdersDrawer/、Toast/
 ├── server/
 │   ├── package.json            # Node 依赖与脚本
 │   ├── start.js                # 统一启动器：Chrome + API + sync.js
-│   ├── index.js                # Express API + 本地 UI
+│   ├── index.js                # Express API + 静态文件服务
 │   ├── db.js                   # SQLite 数据层
 │   ├── sync.js                 # CDP 同步守护进程
 │   ├── auto_reply_worker.js    # 自动回复 worker
 │   ├── ai.js                   # LLM 调用封装
-│   ├── public/                 # 3210 控制台静态资源
+│   ├── public/                 # [自动生成] Vite 构建输出，由 Express 静态服务
 │   ├── data.db                 # [自动生成] SQLite 数据库
 │   ├── server.log              # [自动生成] 启动器 / Chrome / sync 综合日志
 │   └── server3210.log          # [自动生成] API 与内置 worker 日志
@@ -63,18 +77,25 @@ goofishAggregation/
 
 ## 安装依赖
 
-推荐使用锁文件安装：
+### 后端
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd server
 npm ci
 ```
 
-如果你明确接受重新解析依赖，也可以用：
+### 前端
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-npm install
+cd frontend
+npm ci
+```
+
+重新构建前端到 `server/public/`：
+
+```bash
+cd frontend
+npm run build
 ```
 
 ## 启动方式
@@ -116,12 +137,21 @@ CHROME_CLEAR_TRANSIENT_DATA_ON_START=0 npm start
 
 ### 2. 开发模式
 
+后端（文件变更自动重启）：
+
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd server
 npm run dev
 ```
 
-这会用 `node --watch` 启动 API 入口，适合改后端代码时使用。
+前端（Vite 开发服务器，HMR 热更新，`/api` 代理到 3210 端口）：
+
+```bash
+cd frontend
+npm run dev
+```
+
+打开 `http://localhost:5173` 访问前端开发服务器，API 请求自动代理到后端 3210 端口。
 
 ### 3. 单独运行 worker
 

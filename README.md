@@ -16,7 +16,7 @@ This repository is a local aggregation, manual takeover, and auto-reply toolkit 
 - Session aggregation: dual-path collection via the foreground Tampermonkey script and background CDP sync, with all messages persisted into SQLite
 - Qianniu order capture: parses `batch-consign` order cards and stores order ID, buyer, product, amount, quantity, and shipping info
 - Order matching: links Qianniu orders to Goofish sessions precisely by `buyer_user_id + product_id`
-- Local console: inspect sessions, messages, and the outgoing queue at `http://127.0.0.1:3210`
+- Local console: React + TypeScript SPA served at `http://127.0.0.1:3210`, built with Vite
 - Order console: an order drawer lets you inspect script runtime state, sync the current page immediately, or trigger a manual full scan
 - Manual replies: the input box on the right side of the UI pushes messages into the `pending` queue and lets the browser send them
 - AI toggle: the top bar can globally enable or disable AI auto-replies for manual takeover scenarios
@@ -37,15 +37,29 @@ goofishAggregation/
 │   └── qianniu_batch_consign.js # Tampermonkey script: capture Qianniu pending-shipment orders
 ├── xianyu_capture/
 │   └── xianyu_monitor.js        # Tampermonkey script (current panel version 4.0)
+├── frontend/                    # React + TypeScript + Vite frontend source
+│   ├── package.json             # Frontend dependencies (React 18, Vite, TypeScript)
+│   ├── vite.config.ts           # Vite config: builds to server/public/, proxies /api to 3210
+│   ├── tsconfig.json            # TypeScript strict config
+│   ├── index.html               # Vite entry HTML
+│   └── src/
+│       ├── main.tsx             # ReactDOM entry
+│       ├── App.tsx              # Root layout: Header + Sidebar + ChatPanel + OrdersDrawer + Toast
+│       ├── types/api.ts         # TypeScript interfaces
+│       ├── services/            # Typed API fetch wrappers (settings, sessions, outgoing, orders)
+│       ├── context/             # AppContext (useReducer) + usePolling hook
+│       ├── hooks/               # useDebouncedValue, useCopyToClipboard, useToast
+│       ├── styles/              # CSS variables, global reset, shared button styles
+│       └── components/          # Header/, Sidebar/, ChatPanel/, OrdersDrawer/, Toast/
 ├── server/
 │   ├── package.json             # Node dependencies and scripts
 │   ├── start.js                 # Unified launcher: Chrome + API + sync.js
-│   ├── index.js                 # Express API + local UI
+│   ├── index.js                 # Express API + static serving
 │   ├── db.js                    # SQLite data layer
 │   ├── sync.js                  # CDP sync daemon
 │   ├── auto_reply_worker.js     # Auto-reply worker
 │   ├── ai.js                    # LLM integration wrapper
-│   ├── public/                  # Static assets for the 3210 console
+│   ├── public/                  # [generated] Vite build output served by Express
 │   ├── data.db                  # [generated] SQLite database
 │   ├── server.log               # [generated] launcher / Chrome / sync combined log
 │   └── server3210.log           # [generated] API and built-in worker log
@@ -63,18 +77,25 @@ goofishAggregation/
 
 ## Install Dependencies
 
-Using the lockfile is recommended:
+### Backend
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd server
 npm ci
 ```
 
-If you intentionally want to re-resolve dependencies, you can also run:
+### Frontend
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-npm install
+cd frontend
+npm ci
+```
+
+To rebuild the frontend into `server/public/`:
+
+```bash
+cd frontend
+npm run build
 ```
 
 ## How to Start
@@ -116,12 +137,21 @@ CHROME_CLEAR_TRANSIENT_DATA_ON_START=0 npm start
 
 ### 2. Development mode
 
+Backend (auto-restart on file changes):
+
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd server
 npm run dev
 ```
 
-This starts the API entry with `node --watch`, which is useful when editing backend code.
+Frontend (Vite dev server with HMR, proxies `/api` to port 3210):
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open `http://localhost:5173` for the frontend dev server. API requests are proxied to the backend at port 3210.
 
 ### 3. Run the worker separately
 
