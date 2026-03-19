@@ -1,0 +1,94 @@
+/* ── Layout ── */
+.layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Sidebar ── */
+#sidebar {
+  width: var(--sidebar);
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  background: var(--bg2);
+}
+
+.si {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(28, 42, 64, .5);
+  cursor: pointer;
+  transition: all .15s;
+  position: relative;
+  animation: fadeIn .3s ease both;
+}
+
+.si:hover {
+  background: var(--bg3);
+}
+
+.si.active {
+  background: linear-gradient(90deg, rgba(240, 192, 32, .08), transparent);
+  border-left: 3px solid var(--accent);
+}
+
+.si .name {
+  font-weight: 600;
+  font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.si .pid {
+  font-size: 10px;
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-weight: 500;
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+
+.si .preview {
+  font-size: 12px;
+  color: var(--text2);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.si .meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 5px;
+}
+
+.si .meta .price {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.si .pending-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pending);
+  display: inline-block;
+  animation: pulse 1.5s infinite;
+  margin-left: 4px;
+}
+
+#sidebar-msg {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
+}

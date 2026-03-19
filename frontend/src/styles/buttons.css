@@ -1,0 +1,176 @@
+/* ── Button Base ── */
+.btn {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all .15s;
+  font-weight: 500;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--bg4);
+}
+
+.btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(240, 192, 32, .08);
+}
+
+/* ── Toggle Pill ── */
+.toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 122px;
+  justify-content: center;
+  font-weight: 700;
+}
+
+.toggle-pill.on {
+  border-color: rgba(52, 211, 153, .35);
+  background: rgba(52, 211, 153, .1);
+  color: var(--success);
+}
+
+.toggle-pill.off {
+  border-color: rgba(248, 113, 113, .28);
+  background: rgba(248, 113, 113, .08);
+  color: #ffb4b4;
+}
+
+.toggle-pill.warn {
+  border-color: rgba(251, 191, 36, .32);
+  background: rgba(251, 191, 36, .1);
+  color: var(--pending);
+}
+
+.toggle-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+/* ── Runtime Badge ── */
+.runtime-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all .15s;
+}
+
+.runtime-badge::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  flex-shrink: 0;
+}
+
+.runtime-badge.online {
+  color: var(--success);
+  border-color: rgba(52, 211, 153, .28);
+  background: rgba(52, 211, 153, .08);
+}
+
+.runtime-badge.syncing {
+  color: var(--pending);
+  border-color: rgba(251, 191, 36, .28);
+  background: rgba(251, 191, 36, .08);
+}
+
+.runtime-badge.offline {
+  color: #ffb4b4;
+  border-color: rgba(248, 113, 113, .24);
+  background: rgba(248, 113, 113, .08);
+}
+
+/* ── Badge ── */
+.badge {
+  background: var(--accent-g);
+  color: #111;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  min-width: 20px;
+  text-align: center;
+}
+
+/* ── Product Tag ── */
+.product-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(240, 192, 32, .1);
+  border: 1px solid rgba(240, 192, 32, .2);
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* ── Pending Count Badge ── */
+.pending-count-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(251, 191, 36, .1);
+  border: 1px solid rgba(251, 191, 36, .2);
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pending);
+  cursor: pointer;
+  transition: all .15s;
+}
+
+.pending-count-badge:hover {
+  background: rgba(251, 191, 36, .15);
+}
+
+/* ── Chat Mode Badge ── */
+.chat-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .1px;
+}
+
+.chat-mode-badge.ai-on {
+  background: rgba(52, 211, 153, .1);
+  border: 1px solid rgba(52, 211, 153, .24);
+  color: var(--success);
+}
+
+.chat-mode-badge.ai-off {
+  background: rgba(248, 113, 113, .08);
+  border: 1px solid rgba(248, 113, 113, .2);
+  color: #ffb4b4;
+}
