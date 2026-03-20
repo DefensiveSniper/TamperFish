@@ -8,6 +8,7 @@ const { spawnSync } = require('child_process');
 const { WebSocketServer, WebSocket } = require('ws');
 const db = require('./db');
 const { startAutoReplyWorker } = require('./auto_reply_worker');
+const { updateScripts, USERSCRIPT_MANIFEST } = require('./script_updater');
 
 const app = express();
 const PORT = process.env.PORT || 3210;
@@ -301,6 +302,57 @@ app.patch('/api/outgoing-messages/:id', async (req, res) => {
 
 
 
+// ── Userscript serving (for Tampermonkey @downloadURL/@updateURL) ────────────
+
+const USERSCRIPT_MAP = Object.fromEntries(
+  USERSCRIPT_MANIFEST.map((entry) => [entry.name, entry.filePath])
+);
+
+app.get('/scripts/:scriptName.user.js', (req, res) => {
+  console.log(`[scripts] GET ${req.path} (from ${req.headers['user-agent'] || 'unknown'})`);
+  const filePath = USERSCRIPT_MAP[req.params.scriptName];
+  if (!filePath || !fs.existsSync(filePath)) {
+    return res.status(404).end('Script not found');
+  }
+  res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(filePath);
+});
+
+app.get('/scripts/:scriptName.meta.js', (req, res) => {
+  console.log(`[scripts] GET ${req.path} (from ${req.headers['user-agent'] || 'unknown'})`);
+  const filePath = USERSCRIPT_MAP[req.params.scriptName];
+  if (!filePath || !fs.existsSync(filePath)) {
+    return res.status(404).end('Script not found');
+  }
+  const content = fs.readFileSync(filePath, 'utf8');
+  const headerMatch = content.match(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/);
+  if (!headerMatch) {
+    return res.status(500).end('No userscript header found');
+  }
+  res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.end(headerMatch[0]);
+});
+
+// ── POST /api/scripts/update ─────────────────────────────────────────────────
+// 手动触发 Tampermonkey 脚本更新（CDP 自动化）。
+
+app.post('/api/scripts/update', async (_req, res) => {
+  const cdpPort = Number(process.env.CDP_PORT || 18800);
+  const tampermonkeyExtensionId = process.env.TAMPERMONKEY_EXTENSION_ID || '';
+  if (!tampermonkeyExtensionId) {
+    return res.status(503).json({ error: 'Tampermonkey extension ID not discovered' });
+  }
+  try {
+    const result = await updateScripts({ cdpPort, tampermonkeyExtensionId });
+    res.json(result);
+  } catch (err) {
+    console.error('[script-update]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── SPA fallback ──────────────────────────────────────────────────────────────
 
 app.get('*', (_req, res) => {
@@ -580,6 +632,21 @@ async function startServer() {
     console.log(`[server] http://localhost:${PORT}`);
     const intervalMs = parseInt(process.env.AUTO_REPLY_INTERVAL_MS || '3000', 10);
     startAutoReplyWorker({ intervalMs });
+
+    // 启动后延迟触发 Tampermonkey 脚本更新（等待 Chrome 扩展完全初始化）
+    const tampermonkeyExtensionId = process.env.TAMPERMONKEY_EXTENSION_ID || '';
+    const cdpPort = Number(process.env.CDP_PORT || 18800);
+    if (tampermonkeyExtensionId) {
+      setTimeout(async () => {
+        try {
+          console.log('[script-updater] 启动后自动触发脚本更新...');
+          const result = await updateScripts({ cdpPort, tampermonkeyExtensionId });
+          console.log('[script-updater] 更新结果:', JSON.stringify(result));
+        } catch (err) {
+          console.error('[script-updater] 启动更新失败:', err.message);
+        }
+      }, 8000);
+    }
   });
 }
 

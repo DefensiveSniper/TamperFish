@@ -657,6 +657,34 @@ function clearSecurePreferenceProtectionForExtension(securePreferences, extensio
 }
 
 /**
+ * 从 Chrome Secure Preferences 中查找 Tampermonkey 扩展 ID，用于脚本自动更新。
+ * @param {string} chromeUserDataDir - Chrome 用户数据目录。
+ * @param {string} profileDirectory - profile 子目录名。
+ * @returns {string | null} Tampermonkey 扩展 ID，未找到时返回 null。
+ */
+function findTampermonkeyExtensionId(chromeUserDataDir, profileDirectory) {
+  const securePreferencesPath = path.join(chromeUserDataDir, profileDirectory, 'Secure Preferences');
+  if (!fs.existsSync(securePreferencesPath)) return null;
+
+  let securePreferences;
+  try {
+    securePreferences = JSON.parse(fs.readFileSync(securePreferencesPath, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+
+  const extensionSettings = securePreferences?.extensions?.settings;
+  if (!extensionSettings || typeof extensionSettings !== 'object') return null;
+
+  for (const [extensionId, extensionSetting] of Object.entries(extensionSettings)) {
+    if (isTampermonkeyExtensionSetting(extensionSetting)) {
+      return extensionId;
+    }
+  }
+  return null;
+}
+
+/**
  * 启动前修复 Tampermonkey 在 Secure Preferences 中膨胀的 webRequest 子事件注册。
  * 这类异常会让 Chrome 在恢复扩展 service worker 监听时卡死，表现为窗口直接“未响应”。
  * @param {{
@@ -994,6 +1022,8 @@ function startRuntimeProcesses(config) {
     env: {
       ...process.env,
       PORT: String(config.serverPort),
+      CDP_PORT: String(config.cdpPort),
+      TAMPERMONKEY_EXTENSION_ID: config.tampermonkeyExtensionId || '',
     },
     logTargets: [runtimeLogStream, apiLogStream],
   });
@@ -1124,6 +1154,19 @@ async function main() {
   }
 
   await ensureChromeDebugging(config);
+
+  // 发现 Tampermonkey 扩展 ID，用于脚本自动更新
+  const profile = getChromeProfile(config);
+  config.tampermonkeyExtensionId = findTampermonkeyExtensionId(
+    config.chromeUserDataDir,
+    profile.profileDirectory
+  ) || '';
+  if (config.tampermonkeyExtensionId) {
+    log(`发现 Tampermonkey 扩展 ID: ${config.tampermonkeyExtensionId}`);
+  } else {
+    log('未找到 Tampermonkey 扩展，脚本自动更新不可用');
+  }
+
   startChromeWatchdog(config);
   startRuntimeProcesses(config);
 }

@@ -7,6 +7,8 @@
 // @match        https://www.goofish.com/im*
 // @run-at       document-idle
 // @grant        none
+// @downloadURL  http://localhost:3210/scripts/xianyu_monitor.user.js
+// @updateURL    http://localhost:3210/scripts/xianyu_monitor.meta.js
 // ==/UserScript==
 
 (function () {
