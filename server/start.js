@@ -4,6 +4,11 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
+const {
+  DEFAULT_TAMPERMONKEY_EXTENSION_DIR,
+  ensureTampermonkeyProfileSeed,
+  resolveTampermonkeyLoadExtensionDir,
+} = require('./tampermonkey');
 
 const DEFAULT_CDP_PORT = 18800;
 const DEFAULT_SERVER_PORT = 3210;
@@ -20,6 +25,7 @@ const DEFAULT_CHROME_PROXY_CONFIG_PATH = path.join(__dirname, '.chrome-proxy.loc
 const DEFAULT_CHROME_PROXY_SCHEME = 'http';
 const DEFAULT_CHROME_PROXY_BYPASS_LIST = 'localhost;127.0.0.1;::1';
 const DEFAULT_CHROME_PROXY_EXTENSION_DIR = path.join(__dirname, '.chrome-proxy-extension');
+const DEFAULT_CHROME_TAMPERMONKEY_EXTENSION_DIR = DEFAULT_TAMPERMONKEY_EXTENSION_DIR;
 const DEFAULT_CHROME_CLEAR_TRANSIENT_DATA_ON_START = true;
 const DEFAULT_CHROME_START_TIMEOUT_MS = 15000;
 const DEFAULT_CHROME_REPAIR_TAMPERMONKEY_WEBREQUEST_ON_START = true;
@@ -864,11 +870,13 @@ function spawnChild(command, args, options = {}) {
  * 按给定 profile 配置拉起一轮 Chrome，并等待 DevTools 端口就绪。
  * @param {{
  *   cdpPort: number,
+ *   serverPort: number,
  *   goofishUrl: string,
  *   qianniuUrl: string,
  *   chromeUserDataDir: string,
  *   chromeProfileName: string,
  *   chromeProfileDirectory: string,
+ *   chromeTampermonkeyExtensionDir: string,
  *   chromeClearTransientDataOnStart: boolean,
  *   chromeStartTimeoutMs: number
  * }} config - Chrome 启动配置。
@@ -877,9 +885,23 @@ function spawnChild(command, args, options = {}) {
 async function launchChromeAttempt(config) {
   ensureChromeUserDataDir(config.chromeUserDataDir);
   const profile = getChromeProfile(config);
+  const tampermonkeySeedResult = ensureTampermonkeyProfileSeed({
+    chromeUserDataDir: config.chromeUserDataDir,
+    profileDirectory: profile.profileDirectory,
+    serverPort: config.serverPort,
+  });
+  const tampermonkeyExtensionDir = resolveTampermonkeyLoadExtensionDir({
+    chromeTampermonkeyExtensionDir: config.chromeTampermonkeyExtensionDir,
+    chromeUserDataDir: config.chromeUserDataDir,
+    profileDirectory: profile.profileDirectory,
+  });
   clearChromeTransientData(config, profile);
   repairTampermonkeyWebRequestExplosion(config, profile);
   const proxyArgs = buildChromeProxyArgs(config);
+  const extensionDirs = [...proxyArgs.extensionDirs];
+  if (tampermonkeyExtensionDir) {
+    extensionDirs.push(tampermonkeyExtensionDir);
+  }
 
   // 有上次会话时走 --restore-last-session 恢复标签页与 session cookie，不再重复传入 URL；
   // 首次启动（无会话数据）时正常传入启动页 URL。
@@ -893,7 +915,7 @@ async function launchChromeAttempt(config) {
     '--allow-insecure-localhost',
     ...(canRestore ? ['--restore-last-session'] : []),
     ...proxyArgs.args,
-    ...(proxyArgs.extensionDirs.length > 0 ? [`--load-extension=${proxyArgs.extensionDirs.join(',')}`] : []),
+    ...(extensionDirs.length > 0 ? [`--load-extension=${extensionDirs.join(',')}`] : []),
     `--remote-debugging-port=${config.cdpPort}`,
     `--user-data-dir=${config.chromeUserDataDir}`,
     `--profile-directory=${profile.profileDirectory}`,
@@ -903,9 +925,15 @@ async function launchChromeAttempt(config) {
   log(
     `拉起 Chrome profile "${profile.displayName}" (${profile.profileDirectory})，用户数据目录 ${config.chromeUserDataDir}，监听 ${config.cdpPort}`
   );
+  if (tampermonkeySeedResult.seeded) {
+    log(`已为 fresh profile 写入 Tampermonkey 脚本种子: ${tampermonkeySeedResult.targetDir}`);
+  }
   log(canRestore ? '恢复上次会话（保留 session cookie）' : `启动页: ${buildChromeStartupUrls(config).join(' , ')}`);
   if (proxyArgs.logMessage) {
     log(proxyArgs.logMessage);
+  }
+  if (tampermonkeyExtensionDir) {
+    log(`当前 profile 未检测到已安装的 Tampermonkey，改用项目内扩展目录注入: ${tampermonkeyExtensionDir}`);
   }
   const child = spawnChild(launchBase.command, launchArgs, {
     detached: process.platform !== 'win32',
@@ -1098,6 +1126,8 @@ async function main() {
       localChromeProxyConfig.proxyBypassList ||
       DEFAULT_CHROME_PROXY_BYPASS_LIST,
     chromeProxyExtensionDir: DEFAULT_CHROME_PROXY_EXTENSION_DIR,
+    chromeTampermonkeyExtensionDir:
+      process.env.CHROME_TAMPERMONKEY_EXTENSION_DIR || DEFAULT_CHROME_TAMPERMONKEY_EXTENSION_DIR,
     chromeClearTransientDataOnStart:
       chromeClearTransientDataEnv === '0'
         ? false

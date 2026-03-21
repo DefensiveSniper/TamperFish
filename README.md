@@ -172,19 +172,24 @@ Notes:
 
 ## Browser-Side Setup
 
-### 1. Install and enable Tampermonkey
+### 1. The launcher auto-injects Tampermonkey and the scripts
 
-Install the Tampermonkey extension in Chrome.
+When you use the project Chrome profile or any brand-new profile, the launcher now bootstraps Tampermonkey automatically:
 
-### 2. Import the Tampermonkey scripts
+- It loads the bundled unpacked Tampermonkey extension on startup
+- It seeds the following scripts into a fresh profile automatically:
+  - [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
+  - [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
+- It publishes local update endpoints for both scripts:
+  - `http://localhost:3210/scripts/xianyu_monitor.user.js`
+  - `http://localhost:3210/scripts/qianniu_batch_consign.user.js`
 
-Import and enable:
+The current Goofish script panel version is `4.1`, and the Qianniu order script version is `1.5`.
+If Tampermonkey prompts for `trade.taobao.com` access when the Qianniu script runs for the first time, allow it so the script can fetch the product ID from the `tradeSnap` page.
 
-- [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
-- [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
+### 2. Manual import is now only a fallback
 
-The current Goofish script panel version is `4.0`, and the Qianniu order script version is `1.4`. After each script update, make sure the version text inside Tampermonkey is updated as well.
-After importing the Qianniu order script for the first time, allow it to access `trade.taobao.com` so it can fetch the product ID from the `tradeSnap` page.
+If you switch to an external Chrome profile that has neither Tampermonkey nor the project scripts, you can still import the two scripts above manually.
 
 The control channel between the scripts and the local service no longer relies on high-frequency HTTP polling and now uses a single long-lived connection:
 

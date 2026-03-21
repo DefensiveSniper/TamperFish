@@ -8,6 +8,7 @@ const { spawnSync } = require('child_process');
 const { WebSocketServer, WebSocket } = require('ws');
 const db = require('./db');
 const { startAutoReplyWorker } = require('./auto_reply_worker');
+const { getPublishedUserScript } = require('./tampermonkey');
 
 const app = express();
 const PORT = process.env.PORT || 3210;
@@ -59,6 +60,30 @@ app.post('/api/messages/ingest', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * 发布项目内置的 Tampermonkey 用户脚本源码与 metadata 头部，供 fresh profile 安装后继续走本地更新。
+ * @param {string} variant - `user` 返回完整源码，`meta` 仅返回 metadata 头部。
+ * @returns {import('express').RequestHandler} Express 路由处理函数。
+ */
+function createUserScriptPublishHandler(variant) {
+  return (req, res) => {
+    try {
+      const published = getPublishedUserScript(req.params.scriptKey, Number(PORT), variant);
+      res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Source-File', published.sourcePath);
+      res.send(published.body);
+    } catch (error) {
+      res.status(404).json({ error: error.message });
+    }
+  };
+}
+
+// ── GET /scripts/:scriptKey.user.js | .meta.js ──────────────────────────────
+
+app.get('/scripts/:scriptKey.user.js', createUserScriptPublishHandler('user'));
+app.get('/scripts/:scriptKey.meta.js', createUserScriptPublishHandler('meta'));
 
 // ── GET /api/sessions ─────────────────────────────────────────────────────────
 
