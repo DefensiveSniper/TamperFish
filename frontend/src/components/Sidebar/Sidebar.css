@@ -12,6 +12,7 @@
   border-right: 1px solid var(--border);
   overflow-y: auto;
   background: var(--bg2);
+  -webkit-overflow-scrolling: touch;
 }
 
 .si {
@@ -91,4 +92,61 @@
   color: var(--muted);
   font-size: 13px;
   line-height: 1.8;
+}
+
+/* ── Mobile: full-screen view switching ── */
+@media (max-width: 768px) {
+  /* Default: sidebar takes full width */
+  #sidebar {
+    width: 100%;
+    border-right: none;
+  }
+
+  /* When viewing session list: sidebar visible, chat hidden */
+  .layout.mobile-view-list #sidebar {
+    display: block;
+  }
+
+  .layout.mobile-view-list #chat {
+    display: none;
+  }
+
+  /* When viewing chat: chat visible, sidebar hidden */
+  .layout.mobile-view-chat #sidebar {
+    display: none;
+  }
+
+  .layout.mobile-view-chat #chat {
+    display: flex;
+  }
+
+  .si {
+    padding: 14px 16px;
+    padding-left: calc(16px + env(safe-area-inset-left));
+    padding-right: calc(16px + env(safe-area-inset-right));
+    min-height: 60px;
+  }
+
+  .si:active {
+    background: var(--bg3);
+  }
+
+  .si .name {
+    font-size: 14px;
+  }
+
+  .si .preview {
+    font-size: 13px;
+    margin-top: 5px;
+  }
+
+  .si .meta {
+    font-size: 12px;
+    margin-top: 6px;
+  }
+
+  #sidebar-msg {
+    padding-left: calc(20px + env(safe-area-inset-left));
+    padding-right: calc(20px + env(safe-area-inset-right));
+  }
 }

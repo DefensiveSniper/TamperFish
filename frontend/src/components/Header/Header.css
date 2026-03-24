@@ -4,6 +4,8 @@ header {
   align-items: center;
   gap: 12px;
   padding: 0 18px;
+  padding-left: calc(18px + env(safe-area-inset-left));
+  padding-right: calc(18px + env(safe-area-inset-right));
   height: var(--header-h);
   background: linear-gradient(180deg, rgba(20, 30, 46, .95), rgba(13, 20, 32, .98));
   border-bottom: 1px solid var(--border);
@@ -75,6 +77,11 @@ header h1 {
   margin-left: auto;
 }
 
+/* ── Mobile actions toggle — hidden on desktop ── */
+.mobile-actions-toggle {
+  display: none;
+}
+
 #stats {
   font-size: 12px;
   color: var(--muted);
@@ -84,13 +91,91 @@ header h1 {
   border-radius: 6px;
 }
 
-/* ── Responsive ── */
+/* ── Mobile ── */
 @media (max-width: 768px) {
+  header {
+    gap: 8px;
+    padding: 0 12px;
+    padding-top: env(safe-area-inset-top);
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+    height: calc(var(--header-h) + env(safe-area-inset-top));
+    flex-wrap: wrap;
+    position: relative;
+  }
+
+  /* ── Logo compact ── */
+  header h1 {
+    font-size: 13px;
+  }
+
+  .logo-icon {
+    width: 24px;
+    height: 24px;
+    font-size: 13px;
+  }
+
+  /* ── Search ── */
   #search {
-    max-width: 160px;
+    max-width: none;
+    flex: 1;
+    min-width: 0;
+    font-size: 16px; /* prevents iOS zoom */
+    padding: 8px 12px 8px 34px;
+  }
+
+  /* ── Actions: overflow menu dropdown ── */
+  .mobile-actions-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    padding: 0;
+    font-size: 18px;
+    font-weight: 700;
+    flex-shrink: 0;
   }
 
   .header-actions {
-    gap: 6px;
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+    flex-wrap: wrap;
+    gap: 8px;
+    z-index: 15;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .3);
+    margin-left: 0;
+  }
+
+  .header-actions.expanded {
+    display: flex;
+  }
+
+  .header-actions .btn {
+    min-height: 40px;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  .header-actions .toggle-pill {
+    min-height: 40px;
+    min-width: unset;
+    padding: 8px 12px;
+  }
+}
+
+/* ── Small phones ── */
+@media (max-width: 380px) {
+  header h1 {
+    display: none;
   }
 }

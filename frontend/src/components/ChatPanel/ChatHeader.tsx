@@ -2,6 +2,7 @@ import type { Session, Order } from '../../types/api';
 import type { ProductInfo } from '../../types/api';
 import { tryParse } from '../../utils';
 import { useAppState } from '../../context/AppContext';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import ChatOrderSummary from './ChatOrderSummary';
 
 interface ChatHeaderProps {
@@ -18,10 +19,24 @@ export default function ChatHeader({
   onToggleQueue,
 }: ChatHeaderProps) {
   const { appSettings } = useAppState();
+  const isMobile = useIsMobile();
   const p = tryParse<ProductInfo>(session.product_json, {});
+
+  const handleBack = () => {
+    // Trigger browser back to match the history entry pushed by useMobileNav
+    history.back();
+  };
 
   return (
     <div id="chat-header">
+      {isMobile && (
+        <button className="chat-back-btn" onClick={handleBack} aria-label="返回会话列表">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+          <span>会话</span>
+        </button>
+      )}
       <div className="info">
         <div className="cn">{session.customer_name}</div>
         <div className="cm">

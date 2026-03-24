@@ -128,5 +128,76 @@ body {
 @media (max-width: 768px) {
   :root {
     --sidebar: 240px;
+    --header-h: 48px;
+  }
+
+  html, body {
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    padding-top: 0;
+    font-size: 14px;
+  }
+
+  /* Touch-friendly tap targets */
+  .btn {
+    min-height: 40px;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  .runtime-badge {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .product-tag {
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+
+  .pending-count-badge {
+    padding: 6px 12px;
+    font-size: 12px;
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .chat-mode-badge {
+    padding: 5px 12px;
+    font-size: 12px;
+  }
+
+  /* Toast at bottom with safe area */
+  .toast {
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    max-width: calc(100vw - 32px);
+    font-size: 14px;
+    padding: 12px 20px;
+  }
+
+  /* Pin the app to the visual viewport.
+     --app-h / --app-top are set by useViewportHeight via visualViewport API.
+     On iOS Safari the layout viewport ignores the keyboard, so we must
+     manually size the container to the visible area above the keyboard.
+     On Android (interactive-widget=resizes-content) these values match the
+     layout viewport anyway, so it's a harmless no-op. */
+  #root {
+    position: fixed;
+    top: var(--app-top, 0px);
+    left: 0;
+    right: 0;
+    height: var(--app-h, 100vh);
+    overflow: hidden;
+  }
+}
+
+/* ── Landscape phone ── */
+@media (max-width: 768px) and (orientation: landscape) {
+  :root {
+    --header-h: 40px;
   }
 }

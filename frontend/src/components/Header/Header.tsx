@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { useAppState, useAppDispatch } from '../../context/AppContext';
 import { useToast } from '../../hooks/useToast';
 import { getOutgoingMessages } from '../../services/outgoingApi';
@@ -18,6 +18,7 @@ export default function Header({ searchQuery, onSearchChange }: HeaderProps) {
   const { isOrdersDrawerOpen } = useAppState();
   const dispatch = useAppDispatch();
   const toast = useToast();
+  const [actionsExpanded, setActionsExpanded] = useState(false);
 
   const handleOrdersClick = useCallback(() => {
     dispatch({ type: 'TOGGLE_ORDERS_DRAWER' });
@@ -62,7 +63,14 @@ export default function Header({ searchQuery, onSearchChange }: HeaderProps) {
         value={searchQuery}
         onChange={(e) => onSearchChange(e.target.value)}
       />
-      <div className="header-actions">
+      <button
+        className="mobile-actions-toggle btn"
+        onClick={() => setActionsExpanded(!actionsExpanded)}
+        aria-label="展开操作菜单"
+      >
+        ⋯
+      </button>
+      <div className={`header-actions${actionsExpanded ? ' expanded' : ''}`}>
         <AiToggle />
         <CrawlerToggle />
         <CrawlerRuntimeBadge />

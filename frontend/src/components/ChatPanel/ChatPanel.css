@@ -14,6 +14,30 @@
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 10px;
+}
+
+/* ── Mobile back button ── */
+.chat-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 4px 8px 4px 0;
+  margin-left: -4px;
+  flex-shrink: 0;
+  transition: opacity .15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-back-btn:active {
+  opacity: .6;
 }
 
 #chat-header .info {
@@ -416,4 +440,126 @@
   flex-wrap: wrap;
   font-size: 11px;
   color: var(--text2);
+}
+
+/* ── Mobile: ChatPanel ── */
+@media (max-width: 768px) {
+  #chat-header {
+    padding: 10px 14px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .chat-back-btn {
+    align-self: flex-start;
+    margin-bottom: 2px;
+  }
+
+  #chat-header .cn {
+    font-size: 15px;
+  }
+
+  #chat-header .cm {
+    font-size: 11px;
+    gap: 4px;
+  }
+
+  #messages {
+    padding: 12px 10px;
+    padding-left: calc(10px + env(safe-area-inset-left));
+    padding-right: calc(10px + env(safe-area-inset-right));
+    gap: 4px;
+  }
+
+  .bub {
+    max-width: 85%;
+    padding: 10px 14px;
+    font-size: 14px;
+    border-radius: 16px;
+  }
+
+  .me .bub {
+    border-bottom-right-radius: 4px;
+  }
+
+  .them .bub {
+    border-bottom-left-radius: 4px;
+  }
+
+  .bub img.chat-img {
+    max-height: 200px;
+  }
+
+  /* ── Instagram-style compact input bar ── */
+  #outbox-bar {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    padding-left: calc(10px + env(safe-area-inset-left));
+    padding-right: calc(10px + env(safe-area-inset-right));
+    /* When keyboard is closed, honour safe-area for home indicator.
+       When keyboard is open (--kb-open: 1), safe-area is unnecessary
+       because the keyboard already covers the home indicator. */
+    padding-bottom: calc(6px + env(safe-area-inset-bottom));
+  }
+
+  /* Collapse safe-area bottom padding when keyboard is open */
+  :root[data-kb-open] #outbox-bar {
+    padding-bottom: 6px;
+  }
+
+  .outbox-meta {
+    display: none;
+  }
+
+  #ob-input {
+    font-size: 16px; /* prevents iOS zoom on focus */
+    padding: 8px 12px;
+    min-height: 36px;
+    border-radius: 18px;
+  }
+
+  #ob-send {
+    min-height: 36px;
+    min-width: 36px;
+    padding: 0 14px;
+    font-size: 14px;
+    border-radius: 18px;
+    width: auto;
+    flex-shrink: 0;
+  }
+
+  .chat-order-stack {
+    max-width: 100%;
+  }
+
+  .chat-order-card {
+    padding: 8px 10px;
+  }
+
+  .chat-order-card .top {
+    gap: 6px;
+  }
+
+  .oq-item {
+    padding: 10px 14px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    gap: 8px;
+  }
+
+  .oq-time {
+    display: none;
+  }
+
+  .empty-icon {
+    font-size: 40px;
+  }
+
+  .empty-text {
+    font-size: 13px;
+  }
 }

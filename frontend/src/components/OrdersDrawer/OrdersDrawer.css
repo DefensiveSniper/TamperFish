@@ -370,21 +370,96 @@
 
 /* ── Responsive ── */
 @media (max-width: 768px) {
-  .orders-search-row {
-    flex-direction: column;
+  #orders-drawer {
+    width: 100vw;
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .orders-drawer-header {
+    padding: 14px 14px 12px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+  }
+
+  .orders-close-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+  }
+
+  .orders-runtime {
+    margin: 12px 14px 0;
+    margin-left: calc(14px + env(safe-area-inset-left));
+    margin-right: calc(14px + env(safe-area-inset-right));
+  }
+
+  .orders-runtime-grid {
+    grid-template-columns: 1fr;
   }
 
   .orders-runtime-actions {
     width: 100%;
     margin-left: 0;
     justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
-  #orders-drawer {
-    width: 100vw;
+  .orders-runtime-actions .btn {
+    min-height: 40px;
+    padding: 8px 14px;
   }
 
-  .orders-runtime-grid {
-    grid-template-columns: 1fr;
+  .orders-toolbar {
+    padding: 12px 14px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+  }
+
+  .orders-search-row {
+    flex-direction: column;
+  }
+
+  .orders-filter-group {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 2px;
+  }
+
+  .orders-filter-group .btn {
+    min-height: 40px;
+    flex-shrink: 0;
+  }
+
+  #orders-search {
+    font-size: 16px; /* prevents iOS zoom */
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+
+  .orders-list {
+    padding: 12px 14px 22px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+    padding-bottom: calc(22px + env(safe-area-inset-bottom));
+  }
+
+  .order-card {
+    padding: 12px;
+  }
+
+  .order-card-actions {
+    flex-direction: column;
+  }
+
+  .order-card-actions .btn {
+    min-height: 40px;
+    text-align: center;
+    justify-content: center;
+  }
+
+  .order-copy-btn {
+    min-height: 36px;
+    padding: 6px 14px;
   }
 }
