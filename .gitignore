@@ -12,3 +12,4 @@ server/data.db*
 server/*.log
 server/*.pid
 .localhost-wss/
+/tasks/
