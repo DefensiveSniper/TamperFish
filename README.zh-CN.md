@@ -33,10 +33,25 @@
 
 ```text
 goofishAggregation/
-├── qianniu_capture/
-│   └── qianniu_batch_consign.js # Tampermonkey 脚本：千牛待发货订单采集
-├── xianyu_capture/
-│   └── xianyu_monitor.js        # Tampermonkey 脚本（当前面板版本 4.0）
+├── client/                      # 客户端：Chrome + 同步（运行在用户本机）
+│   ├── package.json             # 客户端依赖（ws）
+│   ├── start.js                 # 客户端启动器：Chrome 生命周期 + sync.js + CDP 注入
+│   ├── sync.js                  # CDP 同步守护进程
+│   ├── scripts/
+│   │   ├── xianyu_monitor.js    # Tampermonkey 脚本（当前面板版本 4.0）
+│   │   └── qianniu_batch_consign.js # Tampermonkey 脚本：千牛待发货订单采集
+│   ├── client.log               # [自动生成] Chrome / sync 日志
+│   └── .chrome-proxy-extension/ # [自动生成] 代理认证扩展
+├── server/                      # 服务端：API + 数据库 + 前端服务（可远程部署）
+│   ├── package.json             # Node 依赖与脚本
+│   ├── start.js                 # 服务端启动器：仅启动 index.js
+│   ├── index.js                 # Express API + 静态文件服务 + WSS + 自动回复 worker
+│   ├── db.js                    # SQLite 数据层
+│   ├── auto_reply_worker.js     # 自动回复 worker
+│   ├── ai.js                    # LLM 调用封装
+│   ├── public/                  # [自动生成] Vite 构建输出，由 Express 静态服务
+│   ├── data.db                  # [自动生成] SQLite 数据库
+│   └── server3210.log           # [自动生成] API 与内置 worker 日志
 ├── frontend/                    # React + TypeScript + Vite 前端源码
 │   ├── package.json             # 前端依赖（React 18、Vite、TypeScript）
 │   ├── vite.config.ts           # Vite 配置：构建输出到 server/public/，开发代理 /api 到 3210
@@ -51,21 +66,9 @@ goofishAggregation/
 │       ├── hooks/               # useDebouncedValue、useCopyToClipboard、useToast
 │       ├── styles/              # CSS 变量、全局样式、共享按钮样式
 │       └── components/          # Header/、Sidebar/、ChatPanel/、OrdersDrawer/、Toast/
-├── server/
-│   ├── package.json            # Node 依赖与脚本
-│   ├── start.js                # 统一启动器：Chrome + API + sync.js
-│   ├── index.js                # Express API + 静态文件服务
-│   ├── db.js                   # SQLite 数据层
-│   ├── sync.js                 # CDP 同步守护进程
-│   ├── auto_reply_worker.js    # 自动回复 worker
-│   ├── ai.js                   # LLM 调用封装
-│   ├── public/                 # [自动生成] Vite 构建输出，由 Express 静态服务
-│   ├── data.db                 # [自动生成] SQLite 数据库
-│   ├── server.log              # [自动生成] 启动器 / Chrome / sync 综合日志
-│   └── server3210.log          # [自动生成] API 与内置 worker 日志
 ├── integrations/
-│   └── qianniu/                # 预留扩展
-└── agent_logs/                 # 协作日志
+│   └── qianniu/                 # 预留扩展
+└── agent_logs/                  # 协作日志
 ```
 
 ## 环境要求
@@ -77,11 +80,18 @@ goofishAggregation/
 
 ## 安装依赖
 
-### 后端
+### 服务端
 
 ```bash
 cd server
 npm ci
+```
+
+### 客户端
+
+```bash
+cd client
+npm install
 ```
 
 ### 前端
@@ -100,14 +110,45 @@ npm run build
 
 ## 启动方式
 
-### 1. 一键启动整套链路
+项目分为**服务端**（API + 数据库 + 前端服务 + 自动回复）和**客户端**（Chrome + 同步 + 油猴脚本），两者可以在同一台机器上运行，也可以分开部署。
+
+### 1. 单机启动（服务端和客户端在同一台机器）
+
+分两个终端启动服务端和客户端：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+# 终端 1：启动服务端
+cd server
+npm start
+
+# 终端 2：启动客户端
+cd client
 npm start
 ```
 
-默认会做这些事：
+### 2. 远程服务器部署
+
+服务端运行在远程机器上，客户端运行在本地：
+
+```bash
+# 远程服务器上
+cd server
+npm start
+
+# 本地机器上 — 指向远程服务器
+cd client
+SERVER_URL=http://<远程IP>:3210 SERVER_HOST=<远程IP> npm start
+```
+
+- `SERVER_URL`：告诉 `sync.js` 把聊天数据 POST 到哪里（默认 `http://127.0.0.1:3210`）
+- `SERVER_HOST`：设置后，客户端会通过 CDP 向浏览器注入远程 WSS 地址，油猴脚本会连接 `wss://<SERVER_HOST>:3211/ws/browser` 而非 localhost
+
+远程部署注意事项：
+
+- 远程 WSS 服务需要配置正式 TLS 证书（如 Let's Encrypt）或使用带 TLS 终止的反向代理。通过服务端的 `BROWSER_WSS_CERT_PATH` / `BROWSER_WSS_KEY_PATH` 环境变量配置
+- 自签 localhost 证书仅适用于单机部署
+
+### 3. 客户端启动时做了什么
 
 - 使用仓库下的项目专用 Chrome 目录 `.chrome-xianyu-profile`
 - 启动前自动清理项目 Chrome 的瞬态缓存与残留锁文件，但保留 `Sessions`，以便恢复上次会话和 session cookie
@@ -115,29 +156,33 @@ npm start
 - 如果是首次启动或当前 profile 没有可恢复会话，则自动打开 `https://www.goofish.com/im` 与 `https://myseller.taobao.com/home.htm/batch-consign`
 - 为项目 Chrome 增加 `--allow-insecure-localhost`，允许脚本连接本地自签 `wss://localhost`
 - 为 Chrome 开启 `18800` 调试端口
-- 启动 API 服务 `127.0.0.1:3210`
-- 启动浏览器脚本专用 `wss://localhost:3211/ws/browser`
-- 启动 `sync.js`
-- 启动内置自动回复 worker
+- 如果设置了 `SERVER_HOST`，通过 CDP 向目标页面注入远程 WSS 地址
+- 启动 `sync.js` 将聊天数据同步到服务端
 - 监控 `18800`，如果项目 Chrome 被关掉会自动拉起
 
-如果要排查代理是否导致项目 Chrome 启动异常，可以临时这样启动：
+### 4. 服务端启动时做了什么
+
+- 启动 API 服务 `127.0.0.1:3210`
+- 启动浏览器脚本专用 `wss://localhost:3211/ws/browser`
+- 启动内置自动回复 worker
+
+如果要排查代理是否导致项目 Chrome 启动异常，可以临时这样启动客户端：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 CHROME_PROXY_DISABLED=1 npm start
 ```
 
 如果你明确要保留当前缓存现场、不执行启动前清理，也可以临时关闭：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 CHROME_CLEAR_TRANSIENT_DATA_ON_START=0 npm start
 ```
 
-### 2. 开发模式
+### 5. 开发模式
 
-后端（文件变更自动重启）：
+服务端（文件变更自动重启）：
 
 ```bash
 cd server
@@ -153,12 +198,12 @@ npm run dev
 
 打开 `http://localhost:5173` 访问前端开发服务器，API 请求自动代理到后端 3210 端口。
 
-### 3. 单独运行 worker
+### 6. 单独运行 worker
 
 仅在调试时使用：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd server
 npm run worker
 npm run worker:dry
 npm run worker:once
@@ -167,7 +212,7 @@ npm run worker:dry:once
 
 注意：
 
-- `npm start` 已经会启动内置 worker
+- 服务端 `npm start` 已经会启动内置 worker
 - 不要在 `npm start` 已运行的同时再额外跑 `npm run worker`，否则会出现多个 worker 并发消费同一批 `outbox` 事件的风险
 
 ## 浏览器端配置
@@ -180,17 +225,18 @@ npm run worker:dry:once
 
 导入并启用：
 
-- [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
-- [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
+- [client/scripts/xianyu_monitor.js](client/scripts/xianyu_monitor.js)
+- [client/scripts/qianniu_batch_consign.js](client/scripts/qianniu_batch_consign.js)
 
 当前闲鱼脚本面板版本为 `4.0`，千牛订单脚本版本为 `1.4`。每次脚本更新后，请确认 Tampermonkey 中版本文案也同步更新。
 千牛订单脚本首次导入后，请允许脚本访问 `trade.taobao.com`，用于抓取 `tradeSnap` 页面中的商品 ID。
 
-当前脚本与本地服务的控制链路不再依赖高频 HTTP 轮询，而是走单条长连接：
+当前脚本与服务端的控制链路不再依赖高频 HTTP 轮询，而是走单条长连接：
 
-- `wss://localhost:3211/ws/browser`
+- `wss://localhost:3211/ws/browser`（单机部署）
+- `wss://<SERVER_HOST>:3211/ws/browser`（远程部署 — 设置 `SERVER_HOST` 后由客户端通过 CDP 自动注入）
 
-项目启动时会自动为 localhost 生成一套本地开发证书，并让项目 Chrome 接受 localhost 自签证书。
+单机部署时，项目启动时会自动为 localhost 生成一套本地开发证书，并让项目 Chrome 接受 localhost 自签证书。远程部署时需在服务端配置正式 TLS 证书。
 
 ### 3. 登录闲鱼 / 千牛网页版
 
@@ -247,13 +293,19 @@ npm run worker:dry:once
 - `AUTO_REPLY_ENABLED=0` 会把运行时 AI 开关初始化为关闭
 - 内置 worker 仍然会启动，但会跳过自动回复生成
 
-### Chrome / 启动器相关
+### 服务端相关
 
 - `PORT`：本地 API 端口，默认 `3210`
 - `BROWSER_WSS_PORT`：浏览器脚本专用 WSS 端口，默认 `3211`
 - `BROWSER_WSS_PATH`：浏览器脚本专用 WSS 路径，默认 `/ws/browser`
-- `BROWSER_WSS_CERT_PATH`：可选，自定义 localhost WSS 证书路径
-- `BROWSER_WSS_KEY_PATH`：可选，自定义 localhost WSS 私钥路径
+- `BROWSER_WSS_CERT_PATH`：可选，自定义 WSS 证书路径（远程部署时必需）
+- `BROWSER_WSS_KEY_PATH`：可选，自定义 WSS 私钥路径（远程部署时必需）
+
+### 客户端 / Chrome 相关
+
+- `SERVER_URL`：`sync.js` 推送聊天数据的目标 API 地址，默认 `http://127.0.0.1:3210`
+- `SERVER_HOST`：设置后，客户端会通过 CDP 向浏览器 localStorage 注入 `wss://<SERVER_HOST>:<BROWSER_WSS_PORT>/ws/browser`，使油猴脚本连接远程 WSS
+- `BROWSER_WSS_PORT`：注入 URL 中使用的 WSS 端口，默认 `3211`
 - `CDP_PORT`：Chrome DevTools 调试端口，默认 `18800`
 - `SYNC_INTERVAL`：`sync.js` 轮询间隔，默认 `5000`
 - `CHROME_PROFILE_NAME`：日志里显示的 profile 名，默认 `xianyu`
@@ -275,7 +327,7 @@ npm run worker:dry:once
 
 默认会优先读取本地文件：
 
-- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
+- [client/.chrome-proxy.local.json](client/.chrome-proxy.local.json)
 
 示例：
 
@@ -291,7 +343,7 @@ npm run worker:dry:once
 说明：
 
 - 代理只作用于项目启动器拉起的那一个项目 Chrome，不影响你系统里其他普通 Chrome
-- 如果代理带账号密码，启动器会自动生成本地认证扩展 `server/.chrome-proxy-extension/`
+- 如果代理带账号密码，客户端启动器会自动生成本地认证扩展 `client/.chrome-proxy-extension/`
 - 这两个本地文件/目录都已被 `.gitignore` 忽略
 
 ### 自定义 Chrome 目录的注意事项
@@ -305,11 +357,12 @@ npm run worker:dry:once
 
 默认日志位置：
 
-- [server/server.log](server/server.log)
-  - 启动器日志
+- [client/client.log](client/client.log)
+  - 客户端启动器日志
   - Chrome 输出
   - `sync.js` 输出
 - [server/server3210.log](server/server3210.log)
+  - 服务端启动器日志
   - API 服务日志
   - 内置 worker 日志
 
@@ -345,25 +398,25 @@ npm run worker:dry:once
 
 ### 3. 项目 Chrome 被关掉了怎么办
 
-如果是通过 `npm start` 启动的，watchdog 会监控 `18800`，发现关闭后会自动重新拉起项目 Chrome。
+如果客户端是通过 `npm start` 启动的，watchdog 会监控 `18800`，发现关闭后会自动重新拉起项目 Chrome。
 
 ### 4. 切换代理怎么做
 
 修改：
 
-- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
+- [client/.chrome-proxy.local.json](client/.chrome-proxy.local.json)
 
-然后重启：
+然后重启客户端：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 npm start
 ```
 
 如果要临时绕过代理做故障排查，可以直接用：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 CHROME_PROXY_DISABLED=1 npm start
 ```
 
@@ -399,13 +452,13 @@ CHROME_PROXY_DISABLED=1 npm start
 
 计划改造范围：
 
-- `server/start.js`
+- `client/start.js`
   - 改成实例列表驱动，而不是当前单实例模式
   - 每个实例单独维护 watchdog、Chrome 进程和代理配置
-- `server/sync.js`
-  - 改成“一实例一同步进程”
+- `client/sync.js`
+  - 改成”一实例一同步进程”
   - 上报数据时带上 `instanceId`
-- `xianyu_capture/xianyu_monitor.js`
+- `client/scripts/xianyu_monitor.js`
   - 会话快照、待发消息匹配和发送状态回写都带上实例标识
 - `server/db.js`
   - 为 `sessions`、`messages`、`outbox`、`outgoing_messages` 增加 `instance_id` / `account_id` 维度

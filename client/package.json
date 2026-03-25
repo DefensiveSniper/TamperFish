@@ -1,0 +1,12 @@
+{
+  "name": "goofish-aggregation-client",
+  "version": "1.0.0",
+  "description": "闲鱼聊天聚合 - 客户端（Chrome 启动 + 同步）",
+  "scripts": {
+    "start": "node start.js",
+    "sync": "node sync.js"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}
