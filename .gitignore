@@ -1,17 +1,48 @@
+# ── OS / Editor ────────────────────────────────────────────────────────────────
 .DS_Store
-.chrome-xianyu-profile/
-.chrome-proxy-extension/
-.claude/
-.github/
 .vscode/
-agent_logs/
-docs/
-node_modules/
-server/.chrome-proxy.local.json
-server/.chrome-proxy-extension/
+.claude/
+
+# ── Secrets / Local Overrides ───────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
 server/ai.local.js
+server/.chrome-proxy.local.json
+client/.chrome-proxy.local.json
+
+# ── Dependencies ────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── TypeScript Build Artifacts ──────────────────────────────────────────────────
+*.tsbuildinfo
+main.js
+
+# ── Server Runtime Data ─────────────────────────────────────────────────────────
 server/data.db*
 server/*.log
 server/*.pid
+client/*.log
+server/media-cache/
+
+# ── Frontend Build Output ───────────────────────────────────────────────────────
+server/public/
+server/public/media-cache/
+
+# ── Chrome Extension Build ──────────────────────────────────────────────────────
+chrome_extension/dist/
+chrome_extension/dist/captured/
+chrome_extension/public/captured/
+
+# ── Chrome Profiles / Proxy ─────────────────────────────────────────────────────
+.chrome-xianyu-profile/
+.chrome-proxy-extension/
+server/.chrome-proxy-extension/
+client/.chrome-proxy-extension/
 .localhost-wss/
+
+# ── Docs / Tasks / Logs (Local Only) ───────────────────────────────────────────
+.github/
+agent_logs/
+docs/
 /tasks/
