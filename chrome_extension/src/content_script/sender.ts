@@ -68,14 +68,22 @@ export function doesConversationMatchTask(
         task.customer_name
         || cachedChat?.customerName
         || (task.chat_key || '').split('_')[0];
+    // chat_key 前缀独立提取，作兜底：customer_name 可能误存了卖家名（如与买家重名场景），
+    // 此时直接用 chat_key 第一段匹配，避免找不到目标会话。
+    const chatKeyPrefix = (task.chat_key || '').split('_')[0];
 
     if (taskSessionId && entry.sessionId === String(taskSessionId)) {
         return true;
     }
+
+    const titleMatches =
+        (!!taskCustomerName && entry.title === taskCustomerName)
+        || (!!chatKeyPrefix && chatKeyPrefix !== taskCustomerName && entry.title === chatKeyPrefix);
+
     if (taskProductId) {
-        return entry.title === taskCustomerName && entry.productId === taskProductId;
+        return titleMatches && entry.productId === taskProductId;
     }
-    return !!taskCustomerName && entry.title === taskCustomerName;
+    return titleMatches;
 }
 
 // ---------------------------------------------------------------------------

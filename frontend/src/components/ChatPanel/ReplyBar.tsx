@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
 import { postOutgoingMessage } from '../../services/outgoingApi';
 import { useToast } from '../../hooks/useToast';
-import { useAppDispatch } from '../../context/AppContext';
+import { useAppDispatch, useAppState } from '../../context/AppContext';
 import { getSessionMessages } from '../../services/sessionsApi';
 import { getOutgoingMessages } from '../../services/outgoingApi';
 import { getOrders } from '../../services/ordersApi';
@@ -83,6 +83,13 @@ export default function ReplyBar({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
   const dispatch = useAppDispatch();
+  const { appSettings } = useAppState();
+
+  const HEARTBEAT_OFFLINE_THRESHOLD_S = 30;
+  const lastHeartbeat = Number(appSettings.crawlerLastHeartbeatAt || 0);
+  const extensionOffline =
+    !lastHeartbeat ||
+    Math.floor(Date.now() / 1000) - lastHeartbeat > HEARTBEAT_OFFLINE_THRESHOLD_S;
 
   useEffect(() => {
     if (!replyingMessage || !selectedImageData) {
@@ -205,6 +212,11 @@ export default function ReplyBar({
 
   return (
     <div id="outbox-bar">
+      {extensionOffline && (
+        <div className="outbox-offline-warning">
+          ⚠ 浏览器扩展未连接，消息将排队等待扩展上线后发送
+        </div>
+      )}
       <div className="outbox-bar-header">
         <span className="outbox-bar-label">人工回复</span>
         <span className="outbox-bar-hint">支持引用回复 · 图片先入队再由扩展原生发送</span>
