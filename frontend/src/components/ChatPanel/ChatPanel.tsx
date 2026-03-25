@@ -3,7 +3,7 @@ import { useAppState, useAppDispatch } from '../../context/AppContext';
 import { getSessionMessages } from '../../services/sessionsApi';
 import { getOutgoingMessages } from '../../services/outgoingApi';
 import { getOrders } from '../../services/ordersApi';
-import type { ChatSnapshot } from '../../types/api';
+import type { ChatSnapshot, Message } from '../../types/api';
 import ChatHeader from './ChatHeader';
 import MessageList from './MessageList';
 import OutgoingQueuePanel from './OutgoingQueuePanel';
@@ -16,10 +16,13 @@ export default function ChatPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [queueOpen, setQueueOpen] = useState(false);
+  const [replyingMessage, setReplyingMessage] = useState<Message | null>(null);
 
   // Load chat snapshot when activeKey changes
   useEffect(() => {
     if (!activeKey) return;
+
+    setReplyingMessage(null);
 
     const chatKey = activeKey;
     const cached = chatCache[chatKey];
@@ -110,13 +113,22 @@ export default function ChatPanel() {
         pendingCount={pendingList.length}
         onToggleQueue={toggleQueue}
       />
-      <MessageList messages={messages} customerName={session.customer_name} />
+      <MessageList
+        messages={messages}
+        customerName={session.customer_name}
+        onReply={setReplyingMessage}
+      />
       <OutgoingQueuePanel
         outgoing={outgoing}
         isOpen={queueOpen}
         onClose={() => setQueueOpen(false)}
       />
-      <ReplyBar chatKey={activeKey} session={session} />
+      <ReplyBar
+        chatKey={activeKey}
+        session={session}
+        replyingMessage={replyingMessage}
+        onCancelReply={() => setReplyingMessage(null)}
+      />
     </div>
   );
 }

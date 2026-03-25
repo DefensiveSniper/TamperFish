@@ -58,6 +58,8 @@ async function initSchema(db) {
       seq         INTEGER NOT NULL,
       content     TEXT    NOT NULL,
       is_me       INTEGER NOT NULL CHECK(is_me IN (0,1)),
+      external_message_id TEXT,
+      reply_to_message_id TEXT,
       ingested_at INTEGER NOT NULL DEFAULT (unixepoch()),
       UNIQUE(chat_key, msg_hash)
     );
@@ -87,6 +89,12 @@ async function initSchema(db) {
       product_id   TEXT,
       session_id   TEXT,
       content      TEXT    NOT NULL,
+      message_type TEXT    NOT NULL DEFAULT 'text',
+      media_data   TEXT,
+      media_name   TEXT,
+      reply_to_external_message_id TEXT,
+      reply_to_preview TEXT,
+      reply_to_type TEXT,
       status       TEXT    NOT NULL DEFAULT 'pending'
                          CHECK(status IN ('pending','sending','sent','failed')),
       created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -168,6 +176,12 @@ async function migrateSchema(db) {
     `ALTER TABLE outgoing_messages ADD COLUMN session_id TEXT`,
     `ALTER TABLE outgoing_messages ADD COLUMN claimed_at INTEGER`,
     `ALTER TABLE outgoing_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'`,
+    `ALTER TABLE outgoing_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'`,
+    `ALTER TABLE outgoing_messages ADD COLUMN media_data TEXT`,
+    `ALTER TABLE outgoing_messages ADD COLUMN media_name TEXT`,
+    `ALTER TABLE outgoing_messages ADD COLUMN reply_to_external_message_id TEXT`,
+    `ALTER TABLE outgoing_messages ADD COLUMN reply_to_preview TEXT`,
+    `ALTER TABLE outgoing_messages ADD COLUMN reply_to_type TEXT`,
     `ALTER TABLE orders ADD COLUMN buyer_user_id TEXT`,
     `ALTER TABLE orders ADD COLUMN product_title TEXT`,
     `ALTER TABLE orders ADD COLUMN product_price TEXT`,
@@ -180,6 +194,8 @@ async function migrateSchema(db) {
     `ALTER TABLE orders ADD COLUMN latest_ship_at INTEGER`,
     `ALTER TABLE orders ADD COLUMN last_seen_at INTEGER`,
     `ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'`,
+    `ALTER TABLE messages ADD COLUMN external_message_id TEXT`,
+    `ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`,
   ];
   for (const sql of additions) {
     try { await db.run(sql); } catch (_) { /* column already exists */ }
@@ -308,6 +324,12 @@ async function migrateOutgoingMessagesSchema(db) {
         product_id      TEXT,
         session_id      TEXT,
         content         TEXT    NOT NULL,
+        message_type    TEXT    NOT NULL DEFAULT 'text',
+        media_data      TEXT,
+        media_name      TEXT,
+        reply_to_external_message_id TEXT,
+        reply_to_preview TEXT,
+        reply_to_type   TEXT,
         status          TEXT    NOT NULL DEFAULT 'pending'
                             CHECK(status IN ('pending','sending','sent','failed')),
         created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -327,6 +349,12 @@ async function migrateOutgoingMessagesSchema(db) {
         product_id,
         session_id,
         content,
+        message_type,
+        media_data,
+        media_name,
+        reply_to_external_message_id,
+        reply_to_preview,
+        reply_to_type,
         status,
         created_at,
         sent_at,
@@ -343,6 +371,12 @@ async function migrateOutgoingMessagesSchema(db) {
         COALESCE(legacy.product_id, s.product_id),
         s.session_id,
         legacy.content,
+        'text',
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
         CASE
           WHEN legacy.status IN ('pending','sent','failed') THEN legacy.status
           ELSE 'pending'
@@ -381,6 +415,27 @@ async function migrateOutgoingMessagesSchema(db) {
     throw error;
   }
 }
+
+const OUTGOING_LIST_COLUMNS = [
+  'id',
+  'chat_key',
+  'customer_name',
+  'product_id',
+  'session_id',
+  'content',
+  'message_type',
+  'media_name',
+  'reply_to_external_message_id',
+  'reply_to_preview',
+  'reply_to_type',
+  'status',
+  'created_at',
+  'sent_at',
+  'claimed_at',
+  'error',
+  'retries',
+  'source',
+].join(', ');
 
 /**
  * 从会话载荷中提取买家 userId，优先读取显式字段，再回退到商品与会话元数据。
@@ -739,7 +794,10 @@ async function ingest(sessions) {
         );
       }
 
-      const dbMsgs = await db.all('SELECT content, is_me, seq, type FROM messages WHERE chat_key = ? ORDER BY seq ASC', canonicalChatKey);
+      const dbMsgs = await db.all(
+        'SELECT id, content, is_me, seq, type FROM messages WHERE chat_key = ? ORDER BY seq ASC',
+        canonicalChatKey
+      );
 
       let newMsgCount = 0;
       const newMessages = [];
@@ -748,6 +806,7 @@ async function ingest(sessions) {
       if (messages && messages.length > 0) {
         // 1. Check if the entire incoming array is already a contiguous sub-array in DB
         let isSubstring = false;
+        let substringStart = -1;
         if (dbMsgs.length >= messages.length) {
           for (let start = 0; start <= dbMsgs.length - messages.length; start++) {
             let match = true;
@@ -761,6 +820,7 @@ async function ingest(sessions) {
             }
             if (match) {
               isSubstring = true;
+              substringStart = start;
               break;
             }
           }
@@ -788,18 +848,56 @@ async function ingest(sessions) {
             }
           }
 
+          for (let i = 0; i < overlapLen; i++) {
+            await backfillMessageTransportMetadata(
+              db,
+              canonicalChatKey,
+              dbMsgs[dbMsgs.length - overlapLen + i].seq,
+              messages[i]
+            );
+          }
+
           // 3. Append the remaining incoming messages
           const crypto = require('crypto');
           for (let i = overlapLen; i < messages.length; i++) {
-            const { content, isMe, type = 'text' } = messages[i];
+            const {
+              content,
+              isMe,
+              type = 'text',
+              messageId = null,
+              replyMessageId = null,
+            } = messages[i];
             if (!content) continue;
 
             const hash = crypto.createHash('md5').update(`v3:${chatKey}:${isMe ? 1 : 0}:${type}:${content}:${currentSeq}`).digest('hex');
 
             const result = await db.run(
-              `INSERT OR IGNORE INTO messages(chat_key, msg_hash, seq, content, is_me, type)
-               VALUES(?, ?, ?, ?, ?, ?)`,
-              canonicalChatKey, hash, currentSeq, content, isMe ? 1 : 0, type
+              `INSERT OR IGNORE INTO messages(
+                 chat_key,
+                 msg_hash,
+                 seq,
+                 content,
+                 is_me,
+                 type,
+                 external_message_id,
+                 reply_to_message_id
+               )
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+              canonicalChatKey,
+              hash,
+              currentSeq,
+              content,
+              isMe ? 1 : 0,
+              type,
+              normalizeOptionalText(messageId),
+              normalizeOptionalText(replyMessageId)
+            );
+
+            await backfillMessageTransportMetadata(
+              db,
+              canonicalChatKey,
+              currentSeq,
+              messages[i]
             );
 
             if (result.changes > 0) {
@@ -807,6 +905,15 @@ async function ingest(sessions) {
               newMessages.push({ seq: currentSeq, content, isMe, type });
               currentSeq++;
             }
+          }
+        } else if (substringStart >= 0) {
+          for (let i = 0; i < messages.length; i++) {
+            await backfillMessageTransportMetadata(
+              db,
+              canonicalChatKey,
+              dbMsgs[substringStart + i].seq,
+              messages[i]
+            );
           }
         }
       }
@@ -889,7 +996,20 @@ async function getSessionBySessionId(sessionId) {
 async function getMessages(chatKey) {
   const db = await getDb();
   return db.all(
-    'SELECT seq, content, is_me, type, ingested_at FROM messages WHERE chat_key = ? ORDER BY seq ASC',
+    `SELECT
+       id,
+       chat_key,
+       msg_hash,
+       seq,
+       content,
+       is_me,
+       type,
+       ingested_at,
+       external_message_id,
+       reply_to_message_id
+     FROM messages
+     WHERE chat_key = ?
+     ORDER BY seq ASC`,
     chatKey
   );
 }
@@ -906,6 +1026,33 @@ function normalizeOptionalText(value) {
 
   const normalized = String(value).trim();
   return normalized ? normalized : null;
+}
+
+/**
+ * 将页面原生 messageId 元数据回填到已存在的消息行，兼容历史消息只有内容没有外部 ID 的情况。
+ * @param {import('sqlite').Database} db - SQLite 连接。
+ * @param {string} chatKey - 会话键。
+ * @param {number} seq - 消息序号。
+ * @param {{ messageId?: string | null, replyMessageId?: string | null }} message - 当前采集到的消息载荷。
+ * @returns {Promise<void>}
+ */
+async function backfillMessageTransportMetadata(db, chatKey, seq, message = {}) {
+  const externalMessageId = normalizeOptionalText(message.messageId);
+  const replyToMessageId = normalizeOptionalText(message.replyMessageId);
+  if (!externalMessageId && !replyToMessageId) {
+    return;
+  }
+
+  await db.run(
+    `UPDATE messages
+     SET external_message_id = COALESCE(NULLIF(external_message_id, ''), ?),
+         reply_to_message_id = COALESCE(NULLIF(reply_to_message_id, ''), ?)
+     WHERE chat_key = ? AND seq = ?`,
+    externalMessageId,
+    replyToMessageId,
+    chatKey,
+    seq
+  );
 }
 
 /**
@@ -1273,8 +1420,28 @@ async function listOrdersByChatKey(chatKey, limit = 20) {
  * @param {string|null} sessionId - 可选会话 ID，未传则从 session 回填。
  * @returns {Promise<{id: number}>} 新入队消息的主键。
  */
-async function addOutgoingMessage(chatKey, content, customerName = null, productId = null, source = 'ai', sessionId = null) {
+async function addOutgoingMessage(chatKey, contentOrPayload, customerName = null, productId = null, source = 'ai', sessionId = null) {
   const db = await getDb();
+  let payload = null;
+
+  if (contentOrPayload && typeof contentOrPayload === 'object' && !Array.isArray(contentOrPayload)) {
+    payload = contentOrPayload;
+    customerName = payload.customerName ?? customerName;
+    productId = payload.productId ?? productId;
+    source = payload.source ?? source;
+    sessionId = payload.sessionId ?? sessionId;
+  }
+
+  const content = normalizeOptionalText(payload?.content ?? contentOrPayload) || '';
+  const messageType = payload?.messageType === 'image' ? 'image' : 'text';
+  const mediaData = normalizeOptionalText(payload?.mediaData);
+  const mediaName = normalizeOptionalText(payload?.mediaName);
+  const replyToExternalMessageId = normalizeOptionalText(payload?.replyToExternalMessageId);
+  const replyToPreview = normalizeOptionalText(payload?.replyToPreview);
+  const replyToType = payload?.replyToType === 'image'
+    ? 'image'
+    : (payload?.replyToType === 'text' ? 'text' : null);
+
   // 如果没传 customerName/productId/sessionId，从 session 表查
   if (!customerName || !productId || !sessionId) {
     const session = await db.get(
@@ -1288,9 +1455,33 @@ async function addOutgoingMessage(chatKey, content, customerName = null, product
     }
   }
   const result = await db.run(
-    `INSERT INTO outgoing_messages(chat_key, customer_name, product_id, session_id, content, source)
-     VALUES(?, ?, ?, ?, ?, ?)`,
-    chatKey, customerName, productId, sessionId, content, source
+    `INSERT INTO outgoing_messages(
+       chat_key,
+       customer_name,
+       product_id,
+       session_id,
+       content,
+       source,
+       message_type,
+       media_data,
+       media_name,
+       reply_to_external_message_id,
+       reply_to_preview,
+       reply_to_type
+     )
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    chatKey,
+    customerName,
+    productId,
+    sessionId,
+    content,
+    source,
+    messageType,
+    mediaData,
+    mediaName,
+    replyToExternalMessageId,
+    replyToPreview,
+    replyToType
   );
   return { id: result.lastID };
 }
@@ -1299,24 +1490,38 @@ async function listOutgoingMessages(chatKey, status) {
   const db = await getDb();
   if (chatKey && status) {
     return db.all(
-      'SELECT * FROM outgoing_messages WHERE chat_key = ? AND status = ? ORDER BY id ASC',
+      `SELECT ${OUTGOING_LIST_COLUMNS}
+       FROM outgoing_messages
+       WHERE chat_key = ? AND status = ?
+       ORDER BY id ASC`,
       chatKey, status
     );
   }
   if (chatKey) {
     return db.all(
-      'SELECT * FROM outgoing_messages WHERE chat_key = ? ORDER BY id DESC LIMIT 100',
+      `SELECT ${OUTGOING_LIST_COLUMNS}
+       FROM outgoing_messages
+       WHERE chat_key = ?
+       ORDER BY id DESC
+       LIMIT 100`,
       chatKey
     );
   }
   if (status) {
     return db.all(
-      'SELECT * FROM outgoing_messages WHERE status = ? ORDER BY id ASC LIMIT 100',
+      `SELECT ${OUTGOING_LIST_COLUMNS}
+       FROM outgoing_messages
+       WHERE status = ?
+       ORDER BY id ASC
+       LIMIT 100`,
       status
     );
   }
   return db.all(
-    'SELECT * FROM outgoing_messages ORDER BY id DESC LIMIT 100'
+    `SELECT ${OUTGOING_LIST_COLUMNS}
+     FROM outgoing_messages
+     ORDER BY id DESC
+     LIMIT 100`
   );
 }
 

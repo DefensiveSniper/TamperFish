@@ -5,11 +5,17 @@ import MessageBubble from './MessageBubble';
 interface MessageListProps {
   messages: Message[];
   customerName: string;
+  onReply: (message: Message) => void;
 }
 
-export default function MessageList({ messages, customerName }: MessageListProps) {
+export default function MessageList({ messages, customerName, onReply }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0);
+  const messageByExternalId = new Map(
+    messages
+      .filter((message) => Boolean(message.external_message_id))
+      .map((message) => [message.external_message_id as string, message])
+  );
 
   useEffect(() => {
     const el = containerRef.current;
@@ -40,6 +46,8 @@ export default function MessageList({ messages, customerName }: MessageListProps
             key={m.id}
             message={m}
             customerName={customerName}
+            onReply={onReply}
+            repliedMessage={m.reply_to_message_id ? messageByExternalId.get(m.reply_to_message_id) || null : null}
           />
         ))
       ) : (

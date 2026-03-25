@@ -87,6 +87,7 @@
   display: flex;
   flex-direction: column;
   animation: slideUp .25s ease both;
+  gap: 4px;
 }
 
 .mr.me {
@@ -136,6 +137,32 @@
   border-radius: 8px;
   cursor: pointer;
   display: block;
+}
+
+.bubble-reply-preview {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, .06);
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.bubble-reply-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.bubble-reply-btn:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
 }
 
 #chat-empty {
@@ -307,7 +334,7 @@
   background: var(--bg2);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
-  align-items: center;
+  align-items: flex-start;
 }
 
 .outbox-meta {
@@ -328,6 +355,61 @@
   font-size: 11px;
   color: var(--muted);
   line-height: 1.4;
+}
+
+.outbox-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.outbox-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.outbox-chip.reply {
+  border-color: rgba(240, 192, 32, .28);
+}
+
+.outbox-chip.image {
+  border-color: rgba(56, 189, 248, .22);
+}
+
+.outbox-chip-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.outbox-chip-value {
+  font-size: 12px;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outbox-chip-close {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.outbox-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 #outbox-bar.hidden {
@@ -359,6 +441,29 @@
   color: var(--muted);
 }
 
+#ob-input:disabled {
+  opacity: .65;
+  cursor: not-allowed;
+}
+
+.outbox-file-input {
+  display: none;
+}
+
+.outbox-media-btn {
+  background: rgba(56, 189, 248, .14);
+  color: #8dd8ff;
+  border: 1px solid rgba(56, 189, 248, .24);
+  padding: 9px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+  font-family: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 #ob-send {
   background: var(--accent-g);
   color: #111;
@@ -381,6 +486,14 @@
 
 #ob-send:active {
   transform: none;
+}
+
+#ob-send:disabled,
+.outbox-media-btn:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 /* ── Chat Orders (inline in chat header) ── */

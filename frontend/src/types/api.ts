@@ -34,6 +34,8 @@ export interface Message {
   is_me: number; // 0 or 1
   type: 'text' | 'image';
   ingested_at: number;
+  external_message_id: string | null;
+  reply_to_message_id: string | null;
 }
 
 export interface OutgoingMessage {
@@ -43,6 +45,11 @@ export interface OutgoingMessage {
   product_id: string | null;
   session_id: string | null;
   content: string;
+  message_type: 'text' | 'image';
+  media_name: string | null;
+  reply_to_external_message_id: string | null;
+  reply_to_preview: string | null;
+  reply_to_type: 'text' | 'image' | null;
   status: 'pending' | 'sending' | 'sent' | 'failed';
   source: 'manual' | 'ai';
   created_at: number;
@@ -50,6 +57,21 @@ export interface OutgoingMessage {
   claimed_at: number | null;
   error: string | null;
   retries: number;
+}
+
+export interface PostOutgoingMessageBody {
+  chatKey: string;
+  sessionId?: string;
+  content?: string;
+  messageType?: 'text' | 'image';
+  mediaData?: string;
+  mediaName?: string;
+  replyToExternalMessageId?: string;
+  replyToPreview?: string;
+  replyToType?: 'text' | 'image';
+  source?: 'manual' | 'ai';
+  customerName?: string;
+  productId?: string;
 }
 
 export interface Order {
