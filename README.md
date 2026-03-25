@@ -33,10 +33,25 @@ This repository is a local aggregation, manual takeover, and auto-reply toolkit 
 
 ```text
 goofishAggregation/
-├── qianniu_capture/
-│   └── qianniu_batch_consign.js # Tampermonkey script: capture Qianniu pending-shipment orders
-├── xianyu_capture/
-│   └── xianyu_monitor.js        # Tampermonkey script (current panel version 4.0)
+├── client/                      # Client-side: Chrome + sync (runs on the user's machine)
+│   ├── package.json             # Client dependencies (ws)
+│   ├── start.js                 # Client launcher: Chrome lifecycle + sync.js + CDP injection
+│   ├── sync.js                  # CDP sync daemon
+│   ├── scripts/
+│   │   ├── xianyu_monitor.js    # Tampermonkey script (current panel version 4.0)
+│   │   └── qianniu_batch_consign.js # Tampermonkey script: capture Qianniu pending-shipment orders
+│   ├── client.log               # [generated] Chrome / sync log
+│   └── .chrome-proxy-extension/ # [generated] proxy auth extension
+├── server/                      # Server-side: API + DB + frontend (can run remotely)
+│   ├── package.json             # Node dependencies and scripts
+│   ├── start.js                 # Server launcher: starts index.js only
+│   ├── index.js                 # Express API + static serving + WSS + auto-reply worker
+│   ├── db.js                    # SQLite data layer
+│   ├── auto_reply_worker.js     # Auto-reply worker
+│   ├── ai.js                    # LLM integration wrapper
+│   ├── public/                  # [generated] Vite build output served by Express
+│   ├── data.db                  # [generated] SQLite database
+│   └── server3210.log           # [generated] API and built-in worker log
 ├── frontend/                    # React + TypeScript + Vite frontend source
 │   ├── package.json             # Frontend dependencies (React 18, Vite, TypeScript)
 │   ├── vite.config.ts           # Vite config: builds to server/public/, proxies /api to 3210
@@ -51,18 +66,6 @@ goofishAggregation/
 │       ├── hooks/               # useDebouncedValue, useCopyToClipboard, useToast
 │       ├── styles/              # CSS variables, global reset, shared button styles
 │       └── components/          # Header/, Sidebar/, ChatPanel/, OrdersDrawer/, Toast/
-├── server/
-│   ├── package.json             # Node dependencies and scripts
-│   ├── start.js                 # Unified launcher: Chrome + API + sync.js
-│   ├── index.js                 # Express API + static serving
-│   ├── db.js                    # SQLite data layer
-│   ├── sync.js                  # CDP sync daemon
-│   ├── auto_reply_worker.js     # Auto-reply worker
-│   ├── ai.js                    # LLM integration wrapper
-│   ├── public/                  # [generated] Vite build output served by Express
-│   ├── data.db                  # [generated] SQLite database
-│   ├── server.log               # [generated] launcher / Chrome / sync combined log
-│   └── server3210.log           # [generated] API and built-in worker log
 ├── integrations/
 │   └── qianniu/                 # Reserved for future integrations
 └── agent_logs/                  # Collaboration logs
@@ -77,11 +80,18 @@ goofishAggregation/
 
 ## Install Dependencies
 
-### Backend
+### Server
 
 ```bash
 cd server
 npm ci
+```
+
+### Client
+
+```bash
+cd client
+npm install
 ```
 
 ### Frontend
@@ -100,14 +110,45 @@ npm run build
 
 ## How to Start
 
-### 1. Start the full stack with one command
+The project is split into a **server** (API + database + frontend serving + auto-reply) and a **client** (Chrome + sync + Tampermonkey scripts). They can run on the same machine or separately.
+
+### 1. Single-machine startup (both on the same machine)
+
+Start the server and client in two separate terminals:
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+# Terminal 1: Start the server
+cd server
+npm start
+
+# Terminal 2: Start the client
+cd client
 npm start
 ```
 
-By default this does all of the following:
+### 2. Remote server deployment
+
+Run the server on a remote machine, and the client locally:
+
+```bash
+# On the remote server
+cd server
+npm start
+
+# On the local machine — point to the remote server
+cd client
+SERVER_URL=http://<remote-ip>:3210 SERVER_HOST=<remote-ip> npm start
+```
+
+- `SERVER_URL`: tells `sync.js` where to POST chat data (default `http://127.0.0.1:3210`)
+- `SERVER_HOST`: when set, the client injects the remote WSS address into the browser via CDP so that Tampermonkey scripts connect to `wss://<SERVER_HOST>:3211/ws/browser` instead of localhost
+
+Notes for remote deployment:
+
+- The WSS server on the remote side needs a proper TLS certificate (e.g. Let's Encrypt) or a reverse proxy with TLS termination. Configure via `BROWSER_WSS_CERT_PATH` / `BROWSER_WSS_KEY_PATH` environment variables on the server
+- The self-signed localhost certificate only works for single-machine deployment
+
+### 3. What the client does on startup
 
 - Uses the project Chrome directory `.chrome-xianyu-profile` inside the repository
 - Cleans transient cache and stale lock files from the project Chrome directory before startup, while keeping `Sessions` so the previous browser session and cookies can be restored
@@ -115,29 +156,33 @@ By default this does all of the following:
 - Automatically opens `https://www.goofish.com/im` and `https://myseller.taobao.com/home.htm/batch-consign` if this is the first launch or the current profile has no recoverable session
 - Adds `--allow-insecure-localhost` to the project Chrome instance so scripts can connect to the locally self-signed `wss://localhost`
 - Opens the Chrome remote debugging port `18800`
-- Starts the API service at `127.0.0.1:3210`
-- Starts the browser-script WSS endpoint at `wss://localhost:3211/ws/browser`
-- Starts `sync.js`
-- Starts the built-in auto-reply worker
+- If `SERVER_HOST` is set, injects the remote WSS address into target pages via CDP
+- Starts `sync.js` to sync chat data to the server
 - Monitors port `18800` and automatically relaunches the project Chrome instance if it is closed
 
-If you want to troubleshoot whether the proxy is causing Chrome startup failures, you can temporarily start it like this:
+### 4. What the server does on startup
+
+- Starts the API service at `127.0.0.1:3210`
+- Starts the browser-script WSS endpoint at `wss://localhost:3211/ws/browser`
+- Starts the built-in auto-reply worker
+
+If you want to troubleshoot whether the proxy is causing Chrome startup failures, you can temporarily start the client like this:
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 CHROME_PROXY_DISABLED=1 npm start
 ```
 
 If you explicitly want to preserve the current cache state and skip the pre-start cleanup, you can temporarily disable it:
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 CHROME_CLEAR_TRANSIENT_DATA_ON_START=0 npm start
 ```
 
-### 2. Development mode
+### 5. Development mode
 
-Backend (auto-restart on file changes):
+Server (auto-restart on file changes):
 
 ```bash
 cd server
@@ -153,12 +198,12 @@ npm run dev
 
 Open `http://localhost:5173` for the frontend dev server. API requests are proxied to the backend at port 3210.
 
-### 3. Run the worker separately
+### 6. Run the worker separately
 
 Use this only for debugging:
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd server
 npm run worker
 npm run worker:dry
 npm run worker:once
@@ -167,7 +212,7 @@ npm run worker:dry:once
 
 Notes:
 
-- `npm start` already launches the built-in worker
+- `npm start` in the server already launches the built-in worker
 - Do not run `npm run worker` in parallel with `npm start`, or multiple workers may consume the same `outbox` events concurrently
 
 ## Browser-Side Setup
@@ -180,17 +225,18 @@ Install the Tampermonkey extension in Chrome.
 
 Import and enable:
 
-- [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
-- [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
+- [client/scripts/xianyu_monitor.js](client/scripts/xianyu_monitor.js)
+- [client/scripts/qianniu_batch_consign.js](client/scripts/qianniu_batch_consign.js)
 
 The current Goofish script panel version is `4.0`, and the Qianniu order script version is `1.4`. After each script update, make sure the version text inside Tampermonkey is updated as well.
 After importing the Qianniu order script for the first time, allow it to access `trade.taobao.com` so it can fetch the product ID from the `tradeSnap` page.
 
 The control channel between the scripts and the local service no longer relies on high-frequency HTTP polling and now uses a single long-lived connection:
 
-- `wss://localhost:3211/ws/browser`
+- `wss://localhost:3211/ws/browser` (single-machine deployment)
+- `wss://<SERVER_HOST>:3211/ws/browser` (remote deployment — injected automatically via CDP when `SERVER_HOST` is set)
 
-At startup, the project automatically generates a local development certificate for localhost and configures the project Chrome instance to trust the self-signed localhost certificate.
+At startup, the project automatically generates a local development certificate for localhost and configures the project Chrome instance to trust the self-signed localhost certificate. For remote deployment, configure a proper TLS certificate on the server side.
 
 ### 3. Log in to Goofish / Qianniu Web
 
@@ -247,13 +293,19 @@ Current behavior:
 - `AUTO_REPLY_ENABLED=0` initializes the runtime AI toggle as disabled
 - The built-in worker still starts, but skips auto-reply generation
 
-### Chrome / Launcher
+### Server
 
 - `PORT`: local API port, default `3210`
 - `BROWSER_WSS_PORT`: browser-script WSS port, default `3211`
 - `BROWSER_WSS_PATH`: browser-script WSS path, default `/ws/browser`
-- `BROWSER_WSS_CERT_PATH`: optional custom localhost WSS certificate path
-- `BROWSER_WSS_KEY_PATH`: optional custom localhost WSS private key path
+- `BROWSER_WSS_CERT_PATH`: optional custom WSS certificate path (required for remote deployment)
+- `BROWSER_WSS_KEY_PATH`: optional custom WSS private key path (required for remote deployment)
+
+### Client / Chrome
+
+- `SERVER_URL`: server API URL for `sync.js`, default `http://127.0.0.1:3210`
+- `SERVER_HOST`: when set, the client injects `wss://<SERVER_HOST>:<BROWSER_WSS_PORT>/ws/browser` into browser localStorage via CDP so Tampermonkey scripts connect to the remote WSS
+- `BROWSER_WSS_PORT`: WSS port to use in the injected URL, default `3211`
 - `CDP_PORT`: Chrome DevTools remote debugging port, default `18800`
 - `SYNC_INTERVAL`: `sync.js` polling interval, default `5000`
 - `CHROME_PROFILE_NAME`: profile name shown in logs, default `xianyu`
@@ -273,9 +325,9 @@ Current behavior:
 - `CHROME_PROXY_BYPASS_LIST`
 - `CHROME_PROXY_CONFIG_PATH`
 
-By default the launcher first tries to read the local file:
+By default the client launcher first tries to read the local file:
 
-- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
+- [client/.chrome-proxy.local.json](client/.chrome-proxy.local.json)
 
 Example:
 
@@ -291,7 +343,7 @@ Example:
 Notes:
 
 - The proxy only affects the project Chrome instance launched by this repository and does not affect your normal Chrome instances
-- If the proxy requires a username and password, the launcher automatically generates a local authentication extension in `server/.chrome-proxy-extension/`
+- If the proxy requires a username and password, the client launcher automatically generates a local authentication extension in `client/.chrome-proxy-extension/`
 - Both the local file and that generated directory are ignored by `.gitignore`
 
 ### Notes on custom Chrome directories
@@ -305,11 +357,12 @@ If you customize `CHROME_USER_DATA_DIR`:
 
 Default log locations:
 
-- [server/server.log](server/server.log)
-  - Launcher logs
+- [client/client.log](client/client.log)
+  - Client launcher logs
   - Chrome output
   - `sync.js` output
 - [server/server3210.log](server/server3210.log)
+  - Server launcher logs
   - API service logs
   - Built-in worker logs
 
@@ -345,25 +398,25 @@ The backend now blocks empty snapshots at the `ingest()` layer, so this kind of 
 
 ### 3. What if the project Chrome instance gets closed
 
-If it was started by `npm start`, the watchdog monitors port `18800` and automatically relaunches the project Chrome instance after it is closed.
+If the client was started by `npm start`, the watchdog monitors port `18800` and automatically relaunches the project Chrome instance after it is closed.
 
 ### 4. How do I switch the proxy
 
 Edit:
 
-- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
+- [client/.chrome-proxy.local.json](client/.chrome-proxy.local.json)
 
-Then restart:
+Then restart the client:
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 npm start
 ```
 
 If you want to temporarily bypass the proxy for troubleshooting, use:
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
+cd client
 CHROME_PROXY_DISABLED=1 npm start
 ```
 
@@ -399,13 +452,13 @@ Goals:
 
 Planned refactor scope:
 
-- `server/start.js`
+- `client/start.js`
   - Refactor from the current single-instance mode to an instance-list-driven model
   - Maintain a separate watchdog, Chrome process, and proxy config for each instance
-- `server/sync.js`
+- `client/sync.js`
   - Refactor to "one sync process per instance"
   - Include `instanceId` when reporting data
-- `xianyu_capture/xianyu_monitor.js`
+- `client/scripts/xianyu_monitor.js`
   - Include instance identifiers in session snapshots, outgoing-message matching, and send-status writeback
 - `server/db.js`
   - Add `instance_id` / `account_id` dimensions to `sessions`, `messages`, `outbox`, and `outgoing_messages`

@@ -9,8 +9,7 @@
     "worker": "node auto_reply_worker.js",
     "worker:dry": "node auto_reply_worker.js --dry-run",
     "worker:dry:once": "node auto_reply_worker.js --dry-run --once",
-    "worker:once": "node auto_reply_worker.js --once",
-    "sync": "node sync.js"
+    "worker:once": "node auto_reply_worker.js --once"
   },
   "dependencies": {
     "express": "^4.22.1",

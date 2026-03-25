@@ -191,7 +191,8 @@
 
         browserApiState.manualClose = false;
         browserApiState.connectPromise = new Promise((resolve, reject) => {
-            const socket = new WebSocket(CONFIG.apiWebSocketUrl);
+            const apiWsUrl = localStorage.getItem('xm_server_wss_url') || CONFIG.apiWebSocketUrl;
+            const socket = new WebSocket(apiWsUrl);
             let settled = false;
             browserApiState.socket = socket;
 

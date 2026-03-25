@@ -14,4 +14,7 @@ server/data.db*
 server/*.log
 server/*.pid
 .localhost-wss/
+client/.chrome-proxy.local.json
+client/.chrome-proxy-extension/
+client/*.log
 /tasks/
