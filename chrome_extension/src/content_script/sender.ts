@@ -367,22 +367,28 @@ function dataUrlToFile(dataUrl: string, preferredName?: string | null): File {
 }
 
 /**
- * 通过页面现有上传控件发送图片，作为 webpack helper 失效时的回退方案。
+ * 模拟真实用户行为发送图片：点击上传图标 → 注入文件 → 等待预览 → 点击发送。
+ * 作为主路径使用，避免直接调用页面内部 API 被闲鱼反自动化检测。
  * @param mediaData - 图片 data URL。
  * @param mediaName - 图片文件名。
  */
-async function sendImageViaDomUpload(
+async function sendImageViaDomSimulation(
     mediaData: string,
     mediaName?: string | null
 ): Promise<void> {
-    let uploadInput = findImageUploadInputElement();
-    if (!uploadInput) {
-        const uploadTrigger = findImageUploadTriggerElement();
-        uploadTrigger?.click();
-        await sleep(300);
-        uploadInput = findImageUploadInputElement();
+    // 步骤 1：点击图片上传图标，触发文件选择区域
+    const uploadTrigger = findImageUploadTriggerElement();
+    if (uploadTrigger) {
+        uploadTrigger.click();
+        await sleep(500);
     }
 
+    // 步骤 2：查找文件上传 input 并注入图片
+    let uploadInput = findImageUploadInputElement();
+    if (!uploadInput) {
+        await sleep(500);
+        uploadInput = findImageUploadInputElement();
+    }
     if (!uploadInput) {
         throw new Error('当前页面未找到图片上传入口');
     }
@@ -391,9 +397,20 @@ async function sendImageViaDomUpload(
     const dataTransfer = new DataTransfer();
     dataTransfer.items.add(imageFile);
     uploadInput.files = dataTransfer.files;
+
+    // 模拟用户选择文件后的事件序列
     uploadInput.dispatchEvent(new Event('input', { bubbles: true }));
     uploadInput.dispatchEvent(new Event('change', { bubbles: true }));
-    await sleep(2500);
+
+    // 步骤 3：等待图片预览渲染
+    await sleep(2000);
+
+    // 步骤 4：查找并点击发送按钮（若页面未自动发送）
+    const sendBtn = findSendButtonElement();
+    if (sendBtn) {
+        sendBtn.click();
+        await sleep(1000);
+    }
 }
 
 /**
@@ -449,20 +466,22 @@ async function dispatchOutgoingTask(task: OutgoingMessage): Promise<void> {
     const replyMessageId = task.reply_to_external_message_id || null;
 
     if (messageType === 'image') {
-        if (!activeSessionId) {
-            throw new Error('当前会话缺少 session_id，无法发送图片');
-        }
         if (!task.media_data) {
             throw new Error('图片任务缺少媒体数据');
         }
         try {
-            await sendImageViaPageHelpers(activeSessionId, task.media_data, task.media_name);
+            // 主路径：模拟用户操作（点击上传 → 选文件 → 点发送），降低被检测风险
+            await sendImageViaDomSimulation(task.media_data, task.media_name);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (!message.includes('未暴露图片发送能力')) {
+            if (!message.includes('未找到图片上传入口')) {
                 throw error;
             }
-            await sendImageViaDomUpload(task.media_data, task.media_name);
+            // 回退：DOM 入口不可用时调用页面内部 API
+            if (!activeSessionId) {
+                throw new Error('当前会话缺少 session_id，无法发送图片');
+            }
+            await sendImageViaPageHelpers(activeSessionId, task.media_data, task.media_name);
         }
         return;
     }

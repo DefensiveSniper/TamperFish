@@ -32,6 +32,23 @@ function buildReplyPreview(message: Message | null): string {
   return normalized.length > 36 ? `${normalized.slice(0, 36)}...` : normalized;
 }
 
+function renderReplyChipPreview(message: Message | null) {
+  if (!message) {
+    return '';
+  }
+
+  if (message.type === 'image') {
+    return (
+      <div className="outbox-reply-image-wrap">
+        <img className="outbox-reply-image" src={message.content} alt="引用图片" />
+        <span className="outbox-reply-image-label">图片引用</span>
+      </div>
+    );
+  }
+
+  return buildReplyPreview(message);
+}
+
 /**
  * 将用户选择的图片读成 data URL，供后端入队并由扩展 sender 还原成 File。
  * @param file - 用户在前端挑选的图片文件。
@@ -188,37 +205,44 @@ export default function ReplyBar({
 
   return (
     <div id="outbox-bar">
-      <div className="outbox-meta">
-        <div className="outbox-title">人工回复</div>
-        <div className="outbox-subtitle">
-          文本支持引用回复，图片会先入队再由扩展原生发送
-        </div>
+      <div className="outbox-bar-header">
+        <span className="outbox-bar-label">人工回复</span>
+        <span className="outbox-bar-hint">支持引用回复 · 图片先入队再由扩展原生发送</span>
       </div>
       <div className="outbox-editor">
         {replyingMessage ? (
           <div className="outbox-chip reply">
-            <div className="outbox-chip-label">引用回复</div>
-            <div className="outbox-chip-value">{buildReplyPreview(replyingMessage)}</div>
-            <button type="button" className="outbox-chip-close" onClick={onCancelReply}>
-              取消
+            <span className="outbox-chip-icon">↩</span>
+            <div className="outbox-chip-value">{renderReplyChipPreview(replyingMessage)}</div>
+            <button type="button" className="outbox-chip-close" onClick={onCancelReply} title="取消引用">
+              ✕
             </button>
           </div>
         ) : null}
         {selectedImageData ? (
           <div className="outbox-chip image">
-            <div className="outbox-chip-label">图片待发送</div>
+            <span className="outbox-chip-icon">🖼</span>
             <div className="outbox-chip-value">{selectedImageName || '未命名图片'}</div>
-            <button type="button" className="outbox-chip-close" onClick={clearSelectedImage}>
-              移除
+            <button type="button" className="outbox-chip-close" onClick={clearSelectedImage} title="移除图片">
+              ✕
             </button>
           </div>
         ) : null}
         <div className="outbox-input-row">
+          <button
+            type="button"
+            className="outbox-media-btn"
+            onClick={handlePickImage}
+            disabled={sending}
+            title="发送图片"
+          >
+            📷
+          </button>
           <input
             id="ob-input"
             ref={inputRef}
             type="text"
-            placeholder={selectedImageData ? '当前将发送图片，不能同时附带文本' : '输入人工回复内容，提交后进入 pending 队列...'}
+            placeholder={selectedImageData ? '已选择图片，点击发送' : '输入回复内容，Enter 发送...'}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -232,19 +256,11 @@ export default function ReplyBar({
             onChange={handleImageChange}
           />
           <button
-            type="button"
-            className="outbox-media-btn"
-            onClick={handlePickImage}
-            disabled={sending}
-          >
-            图片
-          </button>
-          <button
             id="ob-send"
             onClick={handleSend}
             disabled={sending}
           >
-            {sending ? '发送中...' : '发送 ↗'}
+            {sending ? '发送中' : '发送'}
           </button>
         </div>
       </div>

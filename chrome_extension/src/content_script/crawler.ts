@@ -9,7 +9,7 @@
 
 import { CONFIG } from './config';
 import { state, scheduleStateSave, schedulePanelRender } from './state';
-import { sleep } from './api';
+import { sleep, browserApiRequest } from './api';
 import {
     buildChatKey,
     syncChatState,
@@ -29,10 +29,109 @@ import {
     getSidebarContainer,
     getItemIdentifier,
     getRenderedMessageNodes,
-    isUserTypingMessage
+    isUserTypingMessage,
+    readCurrentConversationName
 } from './dom';
 import { renderFooter, setCrawlingEnabled, persistCrawlerDesiredState } from './panel';
 import { startSerialLoop } from './utils';
+
+let activeConversationMutationObserver: MutationObserver | null = null;
+let activeConversationMutationTimer: number | null = null;
+
+/**
+ * 判断图片 URL 是否仍然指向远端资源，适合改写为本地缓存地址。
+ * @param url - 原始图片 URL。
+ * @returns 是否需要本地化。
+ */
+function shouldLocalizeImageUrl(url: string): boolean {
+    return /^https?:\/\/img\.alicdn\.com\//i.test(String(url || '').trim());
+}
+
+/**
+ * 批量把图片消息的远端 URL 改写为本地服务缓存地址，降低页面直接访问阿里图片的暴露面。
+ * @param messages - 当前提取出的消息数组。
+ */
+async function localizeImageMessageUrls(messages: Array<{
+    content: string;
+    type?: 'text' | 'image';
+}>): Promise<void> {
+    const remoteUrls = Array.from(new Set(
+        messages
+            .filter(message => message.type === 'image' && shouldLocalizeImageUrl(message.content))
+            .map(message => message.content)
+    ));
+
+    if (!remoteUrls.length) {
+        return;
+    }
+
+    try {
+        const payload = await browserApiRequest('media.cache', { urls: remoteUrls }, {
+            timeoutMs: 30000,
+        }) as { urls?: Record<string, string> };
+
+        const localizedUrlMap = payload?.urls || {};
+        messages.forEach((message) => {
+            if (message.type !== 'image') {
+                return;
+            }
+
+            const localizedUrl = localizedUrlMap[message.content];
+            if (localizedUrl) {
+                message.content = localizedUrl;
+            }
+        });
+    } catch (error) {
+        console.warn(
+            '[XM] localize image urls failed:',
+            error instanceof Error ? error.message : error
+        );
+    }
+}
+
+/**
+ * 基于消息气泡在聊天主区域中的横向位置判断消息归属。
+ * 优先使用实际布局位置，而不是依赖易变的类名语义。
+ * @param messageEl - 单条消息行节点。
+ * @param bubbleEl - 文本或图片气泡节点。
+ * @param mainEl - 当前聊天主区域节点。
+ * @returns 是否为当前账号发送的消息；无法判断时返回 null。
+ */
+function detectMessageOwnershipByLayout(
+    messageEl: HTMLElement,
+    bubbleEl: HTMLElement,
+    mainEl: HTMLElement
+): boolean | null {
+    const bubbleRect = bubbleEl.getBoundingClientRect();
+    const messageRect = messageEl.getBoundingClientRect();
+    const mainRect = mainEl.getBoundingClientRect();
+
+    if (bubbleRect.width <= 0 || messageRect.width <= 0 || mainRect.width <= 0) {
+        return null;
+    }
+
+    const bubbleCenterX = bubbleRect.left + bubbleRect.width / 2;
+    const mainCenterX = mainRect.left + mainRect.width / 2;
+    const minGap = Math.min(24, mainRect.width * 0.08);
+
+    if (bubbleCenterX >= mainCenterX + minGap) {
+        return true;
+    }
+
+    if (bubbleCenterX <= mainCenterX - minGap) {
+        return false;
+    }
+
+    const computedStyle = window.getComputedStyle(messageEl);
+    if (computedStyle.justifyContent === 'flex-end') {
+        return true;
+    }
+    if (computedStyle.justifyContent === 'flex-start') {
+        return false;
+    }
+
+    return null;
+}
 
 // ---------------------------------------------------------------------------
 // 未读条目构建
@@ -411,17 +510,13 @@ export async function extractData(
         const visibleEntries = buildVisibleConversationEntries();
         const activeEntry = visibleEntries.find(entry => entry.isActive) || null;
 
-        let customerName = 'Unknown';
-        const headerEl = main.querySelector<HTMLElement>('div');
-        if (headerEl) {
-            const nameCandidate = headerEl.innerText.split('\n')[0];
-            if (
-                nameCandidate
-                && !nameCandidate.includes(CONFIG.userName)
-                && nameCandidate !== '消息'
-            ) {
-                customerName = nameCandidate.trim();
-            }
+        let customerName = activeEntry?.title?.trim() || '';
+        if (
+            !customerName
+            || customerName === '消息'
+            || customerName === 'Unknown'
+        ) {
+            customerName = readCurrentConversationName();
         }
         if (
             customerName === 'Unknown'
@@ -519,13 +614,7 @@ export async function extractData(
                     || (fallbackImg && fallbackImg.src)
                     || '';
                 if (!imgSrc) return;
-                // 方向判断：检查 flex 列容器的 align-items
-                const flexCol = el.querySelector<HTMLElement>(
-                    'div[style*="flex-direction: column"]'
-                );
-                const isMe = flexCol
-                    ? flexCol.style.alignItems === 'flex-end'
-                    : false;
+                const isMe = detectMessageOwnershipByLayout(el, imgContainer, main) ?? false;
                 messages.push({
                     content: imgSrc,
                     isMe,
@@ -539,7 +628,9 @@ export async function extractData(
             if (textNode) {
                 const content = textNode.innerText.trim();
                 if (!content) return;
-                const isMe = textNode.className.includes('message-text-right');
+                const isMe =
+                    detectMessageOwnershipByLayout(el, textNode, main)
+                    ?? textNode.matches(CONFIG.selectors.myMessage);
                 messages.push({
                     content,
                     isMe,
@@ -549,6 +640,8 @@ export async function extractData(
                 });
             }
         });
+
+        await localizeImageMessageUrls(messages);
 
         const canonicalChatKey = findCanonicalChatKey(customerName, messages);
         const chatKey = product.id
@@ -665,5 +758,48 @@ export function startActiveConversationSyncLoop(): void {
     runActiveConversationSyncOnce();
     startSerialLoop(runActiveConversationSyncOnce, CONFIG.activeSyncIntervalMs, {
         immediate: false
+    });
+
+    if (activeConversationMutationObserver) {
+        activeConversationMutationObserver.disconnect();
+    }
+
+    const main =
+        document.querySelector<HTMLElement>('div[role="main"]')
+        || document.querySelector<HTMLElement>('main');
+    if (!main) {
+        return;
+    }
+
+    activeConversationMutationObserver = new MutationObserver(() => {
+        if (
+            state.activeSyncBusy
+            || state.senderBusy
+            || state.initializationBusy
+            || state.unreadWatchBusy
+            || isUserTypingMessage()
+        ) {
+            return;
+        }
+
+        if (activeConversationMutationTimer !== null) {
+            clearTimeout(activeConversationMutationTimer);
+        }
+
+        activeConversationMutationTimer = window.setTimeout(() => {
+            activeConversationMutationTimer = null;
+            runActiveConversationSyncOnce().catch((error) => {
+                console.warn(
+                    '[XM] active conversation mutation sync failed:',
+                    error instanceof Error ? error.message : error
+                );
+            });
+        }, 300);
+    });
+
+    activeConversationMutationObserver.observe(main, {
+        childList: true,
+        subtree: true,
+        characterData: true
     });
 }

@@ -1,4 +1,5 @@
 import type { Message } from '../../types/api';
+import { formatReplyText, stripQuotedReplyPrefix } from '../../utils/replyPreview';
 
 interface MessageBubbleProps {
   message: Message;
@@ -8,17 +9,40 @@ interface MessageBubbleProps {
   repliedMessage: Message | null;
 }
 
-function buildReplyPreview(message: Message | null): string {
+function renderReplyPreview(message: Message | null, customerName: string) {
   if (!message) {
-    return '引用消息';
+    return (
+      <>
+        <div className="bubble-reply-meta">引用消息</div>
+        <div className="bubble-reply-body">原消息暂不可用</div>
+      </>
+    );
   }
+
+  const authorLabel = message.is_me ? '我' : customerName;
 
   if (message.type === 'image') {
-    return '[图片]';
+    return (
+      <>
+        <div className="bubble-reply-meta">引用 {authorLabel} 的图片</div>
+        <div className="bubble-reply-body bubble-reply-body-image">
+          <div className="bubble-reply-image-wrap">
+            <img className="bubble-reply-image" src={message.content} alt="引用图片" />
+            <span className="bubble-reply-image-label">图片引用</span>
+          </div>
+        </div>
+      </>
+    );
   }
 
-  const normalized = message.content.trim();
-  return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
+  return (
+    <>
+      <div className="bubble-reply-meta">
+        引用 <span className="bubble-reply-author">{authorLabel}</span> 的消息
+      </div>
+      <div className="bubble-reply-body">{formatReplyText(message)}</div>
+    </>
+  );
 }
 
 export default function MessageBubble({
@@ -30,6 +54,10 @@ export default function MessageBubble({
 }: MessageBubbleProps) {
   const side = message.is_me ? 'me' : 'them';
   const label = message.is_me ? '我' : customerName;
+  const repliedAuthorLabel = repliedMessage
+    ? (repliedMessage.is_me ? '我' : customerName)
+    : null;
+  const displayText = stripQuotedReplyPrefix(message, repliedMessage, repliedAuthorLabel);
   const style = animateDelay != null
     ? { animationDelay: `${animateDelay}ms` }
     : { animation: 'none' };
@@ -39,7 +67,7 @@ export default function MessageBubble({
       <div className="ml">{label}</div>
       <div className="bub">
         {message.reply_to_message_id ? (
-          <div className="bubble-reply-preview">{buildReplyPreview(repliedMessage)}</div>
+          <div className="bubble-reply-preview">{renderReplyPreview(repliedMessage, customerName)}</div>
         ) : null}
         {message.type === 'image' ? (
           <img
@@ -49,7 +77,7 @@ export default function MessageBubble({
             onClick={() => window.open(message.content, '_blank')}
           />
         ) : (
-          message.content
+          displayText || message.content
         )}
       </div>
       <button

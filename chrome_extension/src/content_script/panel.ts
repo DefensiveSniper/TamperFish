@@ -13,12 +13,90 @@ import { browserApiRequest } from './api';
 import { escapeHtml } from './dom';
 import type { ChatRecord } from './types';
 
+function escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildQuotedPrefixPattern(parts: Array<string | null | undefined>): RegExp | null {
+    const normalizedParts = parts
+        .map((part) => part?.trim() ?? '')
+        .filter(Boolean);
+
+    if (normalizedParts.length === 0) {
+        return null;
+    }
+
+    const separatorPattern = '[\\s\\n\\r:：>】）)】\\-]+';
+    const pattern = normalizedParts
+        .map((part) => escapeRegex(part).replace(/\s+/g, '\\s+'))
+        .join(separatorPattern);
+
+    return new RegExp(`^\\s*${pattern}[\\s\\n\\r:：>】）)】\\-]*`, 'u');
+}
+
 function renderPanelMessagePreview(content: string, type?: 'text' | 'image'): string {
     if (type === 'image') {
         return `<img src="${escapeHtml(content)}" alt="图片" style="display:block;max-width:180px;max-height:180px;border-radius:10px;cursor:pointer;" />`;
     }
 
     return escapeHtml(content);
+}
+
+function stripQuotedReplyPrefix(
+    content: string,
+    type: 'text' | 'image' | undefined,
+    repliedMessage?: { content: string; type?: 'text' | 'image' } | null,
+    repliedAuthorLabel?: string | null
+): string {
+    const normalizedContent = String(content || '').trim();
+    if (!normalizedContent || type !== 'text' || !repliedMessage || repliedMessage.type === 'image') {
+        return normalizedContent;
+    }
+
+    const quotedText = String(repliedMessage.content || '').trim();
+    if (!quotedText) {
+        return normalizedContent;
+    }
+
+    if (normalizedContent === quotedText) {
+        return '';
+    }
+
+    const prefixPatterns = [
+        buildQuotedPrefixPattern([repliedAuthorLabel, quotedText]),
+        buildQuotedPrefixPattern([quotedText])
+    ].filter((pattern): pattern is RegExp => pattern instanceof RegExp);
+
+    for (const prefixPattern of prefixPatterns) {
+        const matchedPrefix = normalizedContent.match(prefixPattern);
+        if (matchedPrefix) {
+            const remainder = normalizedContent.slice(matchedPrefix[0].length).trim();
+            return remainder || normalizedContent;
+        }
+    }
+
+    const normalizedAuthor = repliedAuthorLabel?.trim();
+    const combinedPrefix = normalizedAuthor ? `${normalizedAuthor}\n${quotedText}` : '';
+
+    if (combinedPrefix && normalizedContent.startsWith(combinedPrefix)) {
+        const remainder = normalizedContent
+            .slice(combinedPrefix.length)
+            .replace(/^[\s\n\r:：>】）)】\-]+/, '')
+            .trim();
+
+        return remainder || normalizedContent;
+    }
+
+    if (!normalizedContent.startsWith(quotedText)) {
+        return normalizedContent;
+    }
+
+    const remainder = normalizedContent
+        .slice(quotedText.length)
+        .replace(/^[\s\n\r:：>】）)】\-]+/, '')
+        .trim();
+
+    return remainder || normalizedContent;
 }
 
 function renderQuotedPreview(chat: ChatRecord, replyMessageId?: string | null): string {
@@ -28,18 +106,24 @@ function renderQuotedPreview(chat: ChatRecord, replyMessageId?: string | null): 
 
     const repliedMessage = chat.messages.find((message) => message.messageId === replyMessageId);
     if (!repliedMessage) {
-        return '<div style="margin-bottom:6px;padding:6px 8px;border-left:3px solid #ffda44;background:#f5f5f5;border-radius:8px;color:#999;font-size:12px;">引用消息</div>';
+        return '<div style="margin-bottom:6px;padding:2px 0 2px 10px;border-left:3px solid #ffda44;border-radius:2px;color:#666;font-size:12px;"><div style="font-size:11px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;color:#c28a00;margin-bottom:4px;">引用消息</div><div style="color:#8098bf;">原消息暂不可用</div></div>';
     }
 
-    const previewText = repliedMessage.type === 'image'
-        ? '[图片]'
+    const authorLabel = repliedMessage.isMe ? '我' : (chat.customerName || '对方');
+
+    const previewContent = repliedMessage.type === 'image'
+        ? `<div style="padding-top:2px;"><div style="display:flex;align-items:center;gap:8px;"><img src="${escapeHtml(repliedMessage.content)}" alt="引用图片" style="display:block;width:40px;height:40px;object-fit:cover;border-radius:6px;flex-shrink:0;" /><span style="color:#8098bf;font-size:12px;line-height:1.3;">图片引用</span></div></div>`
         : escapeHtml(
             repliedMessage.content.length > 48
                 ? `${repliedMessage.content.slice(0, 48)}...`
                 : repliedMessage.content
         );
 
-    return `<div style="margin-bottom:6px;padding:6px 8px;border-left:3px solid #ffda44;background:#f5f5f5;border-radius:8px;color:#666;font-size:12px;">${previewText}</div>`;
+    const wrappedTextContent = repliedMessage.type === 'image'
+        ? previewContent
+        : `<div style="color:#8098bf;">${previewContent}</div>`;
+
+    return `<div style="margin-bottom:6px;padding:2px 0 2px 10px;border-left:3px solid #ffda44;border-radius:2px;color:#666;font-size:12px;"><div style="font-size:11px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;color:#c28a00;margin-bottom:4px;">引用 <span style="color:#8fb3ff;">${escapeHtml(authorLabel)}</span> 的${repliedMessage.type === 'image' ? '图片' : '消息'}</div>${wrappedTextContent}</div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -306,9 +390,18 @@ export function renderPanel(): void {
                         ${
                             chat.messages
                                 .map(
-                                    (m) => `
+                                    (m) => {
+                            const repliedMessage = m.replyMessageId
+                                ? chat.messages.find((message) => message.messageId === m.replyMessageId) || null
+                                : null;
+                            const repliedAuthorLabel = repliedMessage
+                                ? (repliedMessage.isMe ? '我' : displayName)
+                                : null;
+                            const displayContent = stripQuotedReplyPrefix(m.content, m.type, repliedMessage, repliedAuthorLabel);
+
+                            return `
                             <div style="margin-bottom: 8px; display: flex; flex-direction: column; align-items: ${m.isMe ? 'flex-end' : 'flex-start'};">
-                                <div style="font-size:10px;color:#bbb;margin-bottom:3px;margin-${m.isMe ? 'right' : 'left'}:4px;">${m.isMe ? '我' : displayName}</div>
+                                <div style="font-size:10px;color:${m.isMe ? '#c28a00' : '#7f9bc2'};font-weight:600;margin-bottom:3px;margin-${m.isMe ? 'right' : 'left'}:4px;">${m.isMe ? '我' : displayName}</div>
                                 <div style="
                                     max-width: 85%; padding: 8px 12px; border-radius: 12px;
                                     background: ${m.isMe ? '#ffda44' : '#fff'};
@@ -317,9 +410,10 @@ export function renderPanel(): void {
                                     border: ${m.isMe ? 'none' : '1px solid #e0e0e0'};
                                     word-wrap: break-word; white-space: pre-wrap;
                                     box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-                                ">${renderQuotedPreview(chat, m.replyMessageId)}${renderPanelMessagePreview(m.content, m.type)}</div>
+                                ">${renderQuotedPreview(chat, m.replyMessageId)}${renderPanelMessagePreview(displayContent || m.content, m.type)}</div>
                             </div>
-                        `
+                        `;
+                        }
                                 )
                                 .join('') ||
                             '<div style="text-align:center;color:#ddd;padding:10px;">暂无消息</div>'

@@ -42,6 +42,8 @@ export function areMessagesEquivalent(left: Message[] = [], right: Message[] = [
         if ((left[i]?.content || '') !== (right[i]?.content || '')) return false;
         if (!!left[i]?.isMe !== !!right[i]?.isMe) return false;
         if ((left[i]?.type || 'text') !== (right[i]?.type || 'text')) return false;
+        if ((left[i]?.messageId || '') !== (right[i]?.messageId || '')) return false;
+        if ((left[i]?.replyMessageId || '') !== (right[i]?.replyMessageId || '')) return false;
     }
     return true;
 }
