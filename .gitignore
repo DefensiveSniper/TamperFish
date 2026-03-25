@@ -2,6 +2,8 @@
 .chrome-xianyu-profile/
 .chrome-proxy-extension/
 .claude/
+.github/
+.vscode/
 agent_logs/
 docs/
 node_modules/

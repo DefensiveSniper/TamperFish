@@ -220,17 +220,37 @@ app.post('/api/outgoing-messages', async (req, res) => {
     chatKey,
     sessionId,
     content,
+    messageType = 'text',
+    mediaData = null,
+    mediaName = null,
+    replyToExternalMessageId = null,
+    replyToPreview = null,
+    replyToType = null,
     source = 'manual',
     customerName = null,
     productId = null,
   } = req.body || {};
 
-  if ((!chatKey && !sessionId) || !content) {
-    return res.status(400).json({ error: 'chatKey or sessionId, and content are required' });
+  const normalizedContent = typeof content === 'string' ? content.trim() : '';
+  if (!chatKey && !sessionId) {
+    return res.status(400).json({ error: 'chatKey or sessionId is required' });
+  }
+  if (!['text', 'image'].includes(messageType)) {
+    return res.status(400).json({ error: 'messageType must be text or image' });
   }
   if (!['manual', 'ai'].includes(source)) {
     return res.status(400).json({ error: 'source must be manual or ai' });
   }
+  if (messageType === 'text' && !normalizedContent) {
+    return res.status(400).json({ error: 'text message content is required' });
+  }
+  if (messageType === 'image' && (typeof mediaData !== 'string' || !mediaData.startsWith('data:image/'))) {
+    return res.status(400).json({ error: 'image message requires mediaData data URL' });
+  }
+  if (messageType === 'image' && replyToExternalMessageId) {
+    return res.status(400).json({ error: 'image reply is not supported yet' });
+  }
+
   try {
     const session = chatKey
       ? await db.getSession(chatKey)
@@ -240,17 +260,26 @@ app.post('/api/outgoing-messages', async (req, res) => {
     const effectiveSessionId = sessionId ? String(sessionId) : (session.session_id || null);
     const result = await db.addOutgoingMessage(
       effectiveChatKey,
-      content,
-      customerName,
-      productId,
-      source,
-      effectiveSessionId
+      {
+        content: normalizedContent,
+        customerName,
+        productId,
+        source,
+        sessionId: effectiveSessionId,
+        messageType,
+        mediaData,
+        mediaName,
+        replyToExternalMessageId,
+        replyToPreview,
+        replyToType,
+      }
     );
-    console.log(`[outgoing] queued #${result.id} for ${effectiveChatKey} (${source})`);
+    console.log(`[outgoing] queued #${result.id} for ${effectiveChatKey} (${source}/${messageType})`);
     res.status(201).json({
       ok: true,
       id: result.id,
       source,
+      messageType,
       chatKey: effectiveChatKey,
       sessionId: effectiveSessionId,
     });

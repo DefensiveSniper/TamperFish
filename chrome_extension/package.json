@@ -1,0 +1,15 @@
+{
+  "name": "tamperfish-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "ENTRY=content_script vite build && ENTRY=background vite build && ENTRY=popup vite build",
+    "dev": "ENTRY=content_script vite build --watch"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.0.0"
+  }
+}

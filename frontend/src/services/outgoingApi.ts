@@ -1,5 +1,5 @@
 import { apiFetch } from './api';
-import type { OutgoingMessage } from '../types/api';
+import type { OutgoingMessage, PostOutgoingMessageBody } from '../types/api';
 
 export function getOutgoingMessages(
   chatKey?: string,
@@ -12,17 +12,11 @@ export function getOutgoingMessages(
   return apiFetch<OutgoingMessage[]>(`/api/outgoing-messages${qs ? `?${qs}` : ''}`);
 }
 
-export function postOutgoingMessage(body: {
-  chatKey: string;
-  sessionId?: string;
-  content: string;
-  source?: 'manual' | 'ai';
-  customerName?: string;
-  productId?: string;
-}): Promise<{
+export function postOutgoingMessage(body: PostOutgoingMessageBody): Promise<{
   ok: boolean;
   id: number;
   source: string;
+  messageType: 'text' | 'image';
   chatKey: string;
   sessionId: string | null;
 }> {

@@ -1,38 +1,32 @@
-# Agent 协作硬性规定（必须遵守）
+# Repository Guidelines
 
-本项目将由多个 agent 轮流/协同开发。为了避免上下文丢失与重复劳动，制定如下强制流程。
+## Project Structure & Module Organization
+`frontend/` contains the React 18 + TypeScript + Vite console. Put UI components under `frontend/src/components/`, shared state in `frontend/src/context/`, reusable hooks in `frontend/src/hooks/`, and API typings in `frontend/src/types/`. `server/` contains the local Express + SQLite service, Chrome/CDP sync, and auto-reply worker (`index.js`, `db.js`, `sync.js`, `auto_reply_worker.js`). Browser scripts live in `xianyu_capture/` and `qianniu_capture/`. Collaboration artifacts belong in `tasks/` and `agent_logs/`.
 
-## 0. 只读最近一条日志
-- **每个新 agent 开始工作前**：只需要阅读 `agent_logs/LATEST.md`（不要全量翻旧日志）。
-- `agent_logs/LATEST.md` 是最新一次交付的摘要，保证包含继续开发所需的关键信息。
+## Build, Test, and Development Commands
+Install dependencies per package:
 
-## 1. 交付必须写日志（强制）
-- **每次完成一个可交付的变更（哪怕很小）后**，必须写入两份文件：
-  1) `agent_logs/YYYY-MM-DD_HHMM_<agentName>.md`（归档，不覆盖）
-  2) `agent_logs/LATEST.md`（覆盖为本次归档内容的拷贝）
+```bash
+cd server && npm ci
+cd frontend && npm ci
+```
 
-## 2. 日志内容模板（必须包含）
-每条日志必须包含以下小节（标题保持一致，方便机器解析）：
+Key commands:
 
-- **需求（Input / Requirements）**：Boss 本次让你做什么？
-- **你做了什么（What I did）**：具体改了哪些文件/模块/接口？
-- **如何验证（How to verify）**：给出可复制的命令（npm start/curl）与预期结果
-- **影响面（Impact / Risks）**：可能破坏哪里？有没有兼容性注意事项？
-- **下一步（Next steps）**：后续 agent 应该从哪里继续？
+- `cd server && npm start`: launch Chrome, API server on `127.0.0.1:3210`, WSS bridge, sync daemon, and built-in worker.
+- `cd server && npm run dev`: same stack with watch mode for backend iteration.
+- `cd server && npm run worker:once`: run one worker pass for debugging queue behavior.
+- `cd frontend && npm run dev`: start the Vite dev server with `/api` proxied to port `3210`.
+- `cd frontend && npm run build`: type-check and build the SPA into `server/public/`.
 
-## 3. 禁止事项
-- 禁止“只改代码不写日志”。
-- 禁止改动跨目录/跨项目文件而不在日志里说明。
+## Coding Style & Naming Conventions
+Follow the existing style in each area: TypeScript uses 2-space indentation and `PascalCase` component files such as `Header.tsx`; backend and userscripts use plain JavaScript with semicolons and descriptive camelCase helpers. Add function-level comments for non-trivial functions and keep changes minimal. Do not invent new tooling; this repo currently has no ESLint or Prettier config checked in.
 
-## 4. 油猴脚本版本规则
-- 只要修改 `xianyu_capture/xianyu_monitor.js`，必须同步更新脚本中的版本相关标识。
-- 至少同步更新以下位置：
-  1) `@name` 中的版本后缀
-  2) `@version`
-  3) 初始化日志中的版本文案
-  4) 面板标题中的版本文案
-- 本次基线版本为 `3.7`；后续每次改动该脚本，都必须在上述位置体现最新版本号，避免用户无法判断脚本是否已更新。
+## Testing Guidelines
+There is no dedicated automated test suite yet. Before opening a PR, at minimum run `cd frontend && npm run build` and smoke-test the affected flow with `cd server && npm start`. For browser-script changes, verify the Tampermonkey panel, message sync, and order sync manually in Chrome.
 
----
+## Commit & Pull Request Guidelines
+Recent history uses concise conventional prefixes such as `feat:`, `fix:`, `docs:`, and `chore:`. Keep commits focused and describe the user-visible change, for example `fix: stabilize unread session sync`. PRs should include scope, risk, manual verification steps, and screenshots for UI or Tampermonkey panel changes.
 
-只要按这个流程执行，多 agent 协作就不会丢上下文。
+## Agent Workflow Notes
+Read `agent_logs/LATEST.md` before starting. Track work in `tasks/todo.md`, then write both `agent_logs/YYYY-MM-DD_HHMM_<agentName>.md` and `agent_logs/LATEST.md` after each deliverable. If you edit `xianyu_capture/xianyu_monitor.js`, update all version markers together: `@name`, `@version`, initialization log text, and panel title text.
