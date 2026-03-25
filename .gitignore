@@ -4,9 +4,9 @@
 .claude/
 
 # ── Secrets / Local Overrides ───────────────────────────────────────────────────
-.env
-.env.local
-.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
 server/ai.local.js
 server/.chrome-proxy.local.json
 client/.chrome-proxy.local.json
@@ -17,6 +17,8 @@ node_modules/
 # ── TypeScript Build Artifacts ──────────────────────────────────────────────────
 *.tsbuildinfo
 main.js
+server/*.js
+client/*.js
 
 # ── Server Runtime Data ─────────────────────────────────────────────────────────
 server/data.db*
@@ -46,3 +48,4 @@ client/.chrome-proxy-extension/
 agent_logs/
 docs/
 /tasks/
+.vscode/

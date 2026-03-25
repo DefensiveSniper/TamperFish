@@ -2,14 +2,16 @@
   "name": "goofish-aggregation-server",
   "version": "1.0.0",
   "description": "闲鱼聊天记录聚合服务",
-  "main": "index.js",
+  "main": "index.ts",
   "scripts": {
-    "start": "node start.js",
-    "dev": "node start.js --watch",
-    "worker": "node auto_reply_worker.js",
-    "worker:dry": "node auto_reply_worker.js --dry-run",
-    "worker:dry:once": "node auto_reply_worker.js --dry-run --once",
-    "worker:once": "node auto_reply_worker.js --once"
+    "start": "node index.ts",
+    "dev": "node --watch index.ts",
+    "build:frontend": "cd frontend && npm run build && cd ..",
+    "dev:frontend": "cd frontend && npm run dev && cd ..",
+    "worker": "node auto_reply_worker.ts",
+    "worker:dry": "node auto_reply_worker.ts --dry-run",
+    "worker:dry:once": "node auto_reply_worker.ts --dry-run --once",
+    "worker:once": "node auto_reply_worker.ts --once"
   },
   "dependencies": {
     "express": "^4.22.1",

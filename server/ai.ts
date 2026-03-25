@@ -1,6 +1,13 @@
 // @ts-nocheck
 'use strict';
 
+const path = require('path');
+const { loadOptionalEnvFiles } = require('../load_env.ts');
+
+loadOptionalEnvFiles([
+    path.join(__dirname, '.env'),
+]);
+
 /**
  * ai.js — DeepSeek LLM 调用封装
  *

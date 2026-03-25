@@ -5,6 +5,12 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
+const { loadOptionalEnvFiles } = require('../load_env.ts');
+
+loadOptionalEnvFiles([
+  path.join(__dirname, '.env'),
+  path.join(__dirname, '..', 'client', '.env'),
+]);
 
 const DEFAULT_CDP_PORT = 18800;
 const DEFAULT_SERVER_PORT = 3210;
@@ -988,7 +994,7 @@ function startChromeWatchdog(config) {
  * @param {{watch: boolean, serverPort: number, cdpPort: number, syncInterval: number}} config - 业务进程配置。
  */
 function startRuntimeProcesses(config) {
-  const nodeArgs = config.watch ? ['--watch', 'index.js'] : ['index.js'];
+  const nodeArgs = config.watch ? ['--watch', 'index.ts'] : ['index.ts'];
 
   log(`启动 API 服务，端口 ${config.serverPort}`);
   spawnChild(process.execPath, nodeArgs, {
@@ -999,8 +1005,8 @@ function startRuntimeProcesses(config) {
     logTargets: [runtimeLogStream, apiLogStream],
   });
 
-  log(`启动 sync.js，连接 CDP ${config.cdpPort}`);
-  spawnChild(process.execPath, ['sync.js'], {
+  log(`启动 sync.ts，连接 CDP ${config.cdpPort}`);
+  spawnChild(process.execPath, ['sync.ts'], {
     env: {
       ...process.env,
       SERVER_URL: `http://127.0.0.1:${config.serverPort}`,

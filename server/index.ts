@@ -1,36 +1,66 @@
 // @ts-nocheck
 'use strict';
 
+const path = require('path');
+const { loadOptionalEnvFiles } = require('../load_env.ts');
+
+loadOptionalEnvFiles([
+  path.join(__dirname, '.env'),
+]);
+
 const express = require('express');
 const https = require('https');
-const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
 const { WebSocketServer, WebSocket } = require('ws');
-const db = require('./db');
-const { startAutoReplyWorker } = require('./auto_reply_worker');
+const db = require('./db.ts');
+const { startAutoReplyWorker } = require('./auto_reply_worker.ts');
 const {
   cacheRemoteImages,
   localizeMessages,
   localizeSessions,
   serveCachedMediaRequest,
-} = require('./media_cache');
+} = require('./media_cache.ts');
 
 const app = express();
 const PORT = process.env.PORT || 3210;
+const SERVER_BIND_HOST = process.env.SERVER_BIND_HOST || '0.0.0.0';
 const DEFAULT_BROWSER_WSS_PORT = Number(process.env.BROWSER_WSS_PORT || (Number(PORT) + 1));
 const DEFAULT_BROWSER_WSS_PATH = process.env.BROWSER_WSS_PATH || '/ws/browser';
 const DEFAULT_BROWSER_WSS_CERT_DIR = path.join(__dirname, '.localhost-wss');
-const BROWSER_MEDIA_ORIGIN = process.env.BROWSER_MEDIA_ORIGIN || `https://localhost:${DEFAULT_BROWSER_WSS_PORT}`;
+const BROWSER_MEDIA_ORIGIN_EXPLICIT = process.env.BROWSER_MEDIA_ORIGIN || '';
+
+/**
+ * 获取媒体缓存资源的公开访问源。
+ * 优先使用环境变量显式设置；未设置时，尝试从 HTTP 请求的 Host 头推导；
+ * 都不可用时回退到 localhost。
+ */
+function getMediaOrigin(req) {
+  if (BROWSER_MEDIA_ORIGIN_EXPLICIT) return BROWSER_MEDIA_ORIGIN_EXPLICIT;
+  if (req && req.headers && req.headers.host) {
+    return `https://${req.headers.host.replace(/:\d+$/, '')}:${DEFAULT_BROWSER_WSS_PORT}`;
+  }
+  return `https://localhost:${DEFAULT_BROWSER_WSS_PORT}`;
+}
 
 app.use(express.json({ limit: '10mb' }));
 
 // CORS for in-page fetch from https://www.goofish.com to http://127.0.0.1:3210
 // Needed because history-sync runs inside goofish.com origin.
+const CORS_BUILTIN_PATTERNS = [
+  /^https:\/\/www\.goofish\.com$/i,
+  /^https?:\/\/127\.0\.0\.1(?::\d+)?$/i,
+  /^https?:\/\/localhost(?::\d+)?$/i,
+];
+const CORS_EXTRA_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  // Allow goofish origin (and local dev)
-  const allow = origin && (/^https:\/\/www\.goofish\.com$/i.test(origin) || /^https?:\/\/127\.0\.0\.1(?::\d+)?$/i.test(origin) || /^https?:\/\/localhost(?::\d+)?$/i.test(origin));
+  const allow = origin && (
+    CORS_BUILTIN_PATTERNS.some(re => re.test(origin)) ||
+    CORS_EXTRA_ORIGINS.includes(origin)
+  );
   if (allow) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
@@ -59,7 +89,7 @@ app.post('/api/messages/ingest', async (req, res) => {
   }
   try {
     const localizedSessions = await localizeSessions(sessions, {
-      publicOrigin: BROWSER_MEDIA_ORIGIN,
+      publicOrigin: getMediaOrigin(req),
     });
     const results = await db.ingest(localizedSessions);
     const totalNew = Object.values(results).reduce((s, r) => s + r.newMsgCount, 0);
@@ -89,7 +119,7 @@ app.get('/api/sessions/:chatKey/messages', async (req, res) => {
     if (!session) return res.status(404).json({ error: 'session not found' });
     const messages = await localizeMessages(
       await db.getMessages(req.params.chatKey),
-      { publicOrigin: BROWSER_MEDIA_ORIGIN }
+      { publicOrigin: getMediaOrigin(req) }
     );
     res.json({ session, messages });
   } catch (err) {
@@ -366,6 +396,10 @@ function ensureBrowserWssTlsMaterial() {
     fs.mkdirSync(path.dirname(certPath), { recursive: true });
     fs.mkdirSync(path.dirname(keyPath), { recursive: true });
 
+    const extraSan = (process.env.BROWSER_WSS_CERT_SAN || '').trim();
+    const baseSan = 'DNS:localhost,IP:127.0.0.1';
+    const fullSan = extraSan ? `${baseSan},${extraSan}` : baseSan;
+
     const opensslArgs = [
       'req',
       '-x509',
@@ -376,7 +410,7 @@ function ensureBrowserWssTlsMaterial() {
       '-out', certPath,
       '-days', '3650',
       '-subj', '/CN=localhost',
-      '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+      '-addext', `subjectAltName=${fullSan}`,
     ];
 
     let result;
@@ -484,7 +518,7 @@ async function handleBrowserRpcAction(action, payload = {}) {
       }
 
       const urls = await cacheRemoteImages(urlList, {
-        publicOrigin: BROWSER_MEDIA_ORIGIN,
+        publicOrigin: getMediaOrigin(null),
       });
 
       return {
@@ -608,9 +642,9 @@ function startBrowserWssServer() {
     });
   });
 
-  httpsServer.listen(port, () => {
-    console.log(`[browser-wss] wss://localhost:${port}${wssPath}`);
-    console.log(`[browser-wss] health https://localhost:${port}/health`);
+  httpsServer.listen(port, SERVER_BIND_HOST, () => {
+    console.log(`[browser-wss] wss://${SERVER_BIND_HOST}:${port}${wssPath}`);
+    console.log(`[browser-wss] health https://${SERVER_BIND_HOST}:${port}/health`);
     if (tlsMaterial.generated) {
       console.log(`[browser-wss] generated localhost cert: ${tlsMaterial.certPath}`);
       console.log(`[browser-wss] generated localhost key: ${tlsMaterial.keyPath}`);
@@ -634,15 +668,34 @@ async function bootstrapSettings() {
 }
 
 /**
+ * 如果 public/ 目录不存在，自动构建前端。
+ */
+function ensureFrontendBuilt() {
+  const publicDir = path.join(__dirname, 'public');
+  const frontendDir = path.join(__dirname, 'frontend');
+  if (fs.existsSync(publicDir) || !fs.existsSync(frontendDir)) return;
+
+  console.log('[server] public/ not found, building frontend...');
+  const result = spawnSync('npm', ['run', 'build'], {
+    cwd: frontendDir,
+    stdio: 'inherit',
+  });
+  if (result.status !== 0) {
+    console.warn('[server] frontend build failed, continuing without static files');
+  }
+}
+
+/**
  * 启动 Express 与自动回复 worker。
  * @returns {Promise<void>}
  */
 async function startServer() {
+  ensureFrontendBuilt();
   await bootstrapSettings();
   startBrowserWssServer();
 
-  app.listen(PORT, () => {
-    console.log(`[server] http://localhost:${PORT}`);
+  app.listen(PORT, SERVER_BIND_HOST, () => {
+    console.log(`[server] http://${SERVER_BIND_HOST}:${PORT}`);
     const intervalMs = parseInt(process.env.AUTO_REPLY_INTERVAL_MS || '3000', 10);
     startAutoReplyWorker({ intervalMs });
   });

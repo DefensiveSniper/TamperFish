@@ -1,14 +1,23 @@
-#!/usr/bin/env node
+// @ts-nocheck
+'use strict';
+
+const path = require('path');
+const { loadOptionalEnvFiles } = require('../load_env.ts');
+
+loadOptionalEnvFiles([
+  path.join(__dirname, '.env'),
+]);
+
 /**
- * sync.js — Xianyu chat history syncer (long-running daemon)
+ * sync.ts — Xianyu chat history syncer (long-running daemon)
  * Reads xm_chat_history from the OpenClaw browser (goofish.com/im tab)
  * via Chrome DevTools Protocol (CDP), then POSTs it to the local ingest API.
  *
  * Runs continuously, syncing every SYNC_INTERVAL ms (default 5000).
  *
  * Usage:
- *   node sync.js
- *   CDP_PORT=18800 SERVER_PORT=3210 SYNC_INTERVAL=5000 node sync.js
+ *   node sync.ts
+ *   CDP_PORT=18800 SERVER_PORT=3210 SYNC_INTERVAL=5000 node sync.ts
  */
 
 const CDP_PORT = process.env.CDP_PORT || 18800;
@@ -17,14 +26,14 @@ const SYNC_INTERVAL = parseInt(process.env.SYNC_INTERVAL, 10) || 5000;
 
 const { WebSocket } = require('ws');
 
-let ws = null;
-let wsUrl = null;
+let ws: InstanceType<typeof WebSocket> | null = null;
+let wsUrl: string | null = null;
 let msgId = 0;
-let lastHash = null;
+let lastHash: string | null = null;
 let stopping = false;
 
 // ── Graceful shutdown ──────────────────────────────────────────────
-function shutdown(signal) {
+function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   console.log(`[sync] received ${signal}, shutting down...`);
@@ -35,12 +44,12 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 // ── Simple hash for change detection ───────────────────────────────
-function simpleHash(str) {
+function simpleHash(str: string): string {
   return require('crypto').createHash('md5').update(str).digest('hex');
 }
 
 // ── Find goofish IM tab ────────────────────────────────────────────
-async function findTab() {
+async function findTab(): Promise<string> {
   const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
   if (!res.ok) throw new Error(`CDP not available at port ${CDP_PORT}`);
   const tabs = await res.json();
@@ -50,7 +59,7 @@ async function findTab() {
 }
 
 // ── Ensure WebSocket connection ────────────────────────────────────
-function ensureConnection(url) {
+function ensureConnection(url: string): Promise<InstanceType<typeof WebSocket>> {
   return new Promise((resolve, reject) => {
     if (ws && ws.readyState === WebSocket.OPEN && wsUrl === url) {
       return resolve(ws);
@@ -78,7 +87,7 @@ function ensureConnection(url) {
 }
 
 // ── Evaluate expression via CDP ────────────────────────────────────
-function evalInTab(expression) {
+function evalInTab(expression: string): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return reject(new Error('WebSocket not connected'));
@@ -119,7 +128,7 @@ function evalInTab(expression) {
 }
 
 // ── Single sync cycle ──────────────────────────────────────────────
-async function syncOnce() {
+async function syncOnce(): Promise<void> {
   // 1. Find tab & connect
   const url = await findTab();
   await ensureConnection(url);
@@ -166,7 +175,7 @@ async function syncOnce() {
 }
 
 // ── Main loop ──────────────────────────────────────────────────────
-async function loop() {
+async function loop(): Promise<void> {
   console.log(`[sync] starting daemon — interval ${SYNC_INTERVAL}ms`);
 
   while (!stopping) {

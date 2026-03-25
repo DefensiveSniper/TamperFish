@@ -1,14 +1,21 @@
 // @ts-nocheck
 'use strict';
 
+const path = require('path');
+const { loadOptionalEnvFiles } = require('../load_env.ts');
+
+loadOptionalEnvFiles([
+    path.join(__dirname, '.env'),
+]);
+
 /**
- * auto_reply_worker.js — 自动回复 Worker (Real-time Version)
+ * auto_reply_worker.ts — 自动回复 Worker (Real-time Version)
  *
  * 消费 outbox 中未处理的 new_messages 事件 → 调用 DeepSeek 生成回复 → 写入 outgoing_messages(pending)
  */
 
-const db = require('./db');
-const { generateReply } = require('./ai');
+const db = require('./db.ts');
+const { generateReply } = require('./ai.ts');
 
 let running = false;
 let timeoutId = null;
@@ -221,7 +228,7 @@ async function runCli() {
     });
 }
 
-// Support CLI run for testing (node server/auto_reply_worker.js --dry-run)
+// Support CLI run for testing (node server/auto_reply_worker.ts --dry-run)
 if (require.main === module) {
     runCli().catch((err) => {
         log('error', `CLI failed: ${err.message}`);

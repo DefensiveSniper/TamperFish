@@ -18,6 +18,7 @@
     const SCRIPT_VERSION = '1.5';
     const CONFIG = {
         apiWebSocketUrl: 'wss://localhost:3211/ws/browser',
+        apiWebSocketUrlStorageKey: 'xm_server_wss_url',
         apiRequestTimeoutMs: 10000,
         apiReconnectDelayMs: 1500,
         heartbeatIntervalMs: 3000,
@@ -287,6 +288,20 @@
     }
 
     /**
+     * 读取当前页面生效的浏览器 RPC WSS 地址。
+     * 优先使用 localStorage 中由启动器注入的覆写值；未设置时回退到脚本默认地址。
+     * @returns {string} 当前应连接的 WSS 地址。
+     */
+    function getBrowserApiWebSocketUrl() {
+        try {
+            const overrideUrl = window.localStorage.getItem(CONFIG.apiWebSocketUrlStorageKey);
+            return overrideUrl ? overrideUrl.trim() || CONFIG.apiWebSocketUrl : CONFIG.apiWebSocketUrl;
+        } catch (_) {
+            return CONFIG.apiWebSocketUrl;
+        }
+    }
+
+    /**
      * 建立到本地 Node 服务的单条 WSS 长连接。
      * @returns {Promise<WebSocket>} 已经连通的 WebSocket。
      */
@@ -300,7 +315,7 @@
 
         browserApiState.manualClose = false;
         browserApiState.connectPromise = new Promise((resolve, reject) => {
-            const socket = new WebSocket(CONFIG.apiWebSocketUrl);
+            const socket = new WebSocket(getBrowserApiWebSocketUrl());
             let settled = false;
             browserApiState.socket = socket;
 

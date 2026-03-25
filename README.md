@@ -1,420 +1,262 @@
-# Goofish Chat Aggregation Service (`TamperFish`)
+# TamperFish
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+TamperFish 是一个面向闲鱼卖家场景的本地工作台，目标是把聊天采集、订单采集、人工接管、AI 自动回复和统一控制台收敛到同一套本地系统里。
 
-This repository is a local aggregation, manual takeover, and auto-reply toolkit built around the Goofish PC Web messaging flow and the Qianniu "pending shipment" order flow. The repository currently wires together 6 end-to-end pipelines:
+当前仓库的主链路是：
 
-1. A Tampermonkey script collects sessions, messages, and session-side metadata from `goofish.com/im`
-2. `sync.js` periodically reads browser-local cache through Chrome CDP and backfills Goofish messages
-3. A Qianniu Tampermonkey script collects pending-shipment orders from `myseller.taobao.com/home.htm/batch-consign`
-4. A local API + SQLite aggregates sessions, messages, and orders, and serves the management console on port `3210`
-5. Outgoing messages enter the `outgoing_messages` queue and are sent back through the browser script
-6. Qianniu orders are automatically linked to Goofish sessions by `buyer_user_id + product_id` and shown both in the console and at the top of each chat
+- `chrome_extension/` 在 `https://www.goofish.com/im` 侧采集聊天、执行发送动作
+- `qianniu_capture/` 在千牛待发货页采集订单
+- `server/` 提供 HTTP API、WSS RPC、SQLite 持久化、媒体缓存和自动回复 Worker
+- `server/frontend/` 提供 React 管理控制台，构建产物输出到 `server/public/`
 
-## Core Capabilities
+## 当前状态
 
-- Session aggregation: dual-path collection via the foreground Tampermonkey script and background CDP sync, with all messages persisted into SQLite
-- Qianniu order capture: parses `batch-consign` order cards and stores order ID, buyer, product, amount, quantity, and shipping info
-- Order matching: links Qianniu orders to Goofish sessions precisely by `buyer_user_id + product_id`
-- Local console: React + TypeScript SPA served at `http://127.0.0.1:3210`, built with Vite
-- Order console: an order drawer lets you inspect script runtime state, sync the current page immediately, or trigger a manual full scan
-- Manual replies: the input box on the right side of the UI pushes messages into the `pending` queue and lets the browser send them
-- AI toggle: the top bar can globally enable or disable AI auto-replies for manual takeover scenarios
-- Patrol toggle: the top bar can remotely enable or disable background Tampermonkey patrol without affecting precise sending or on-demand backfill
-- Startup initialization: after the project starts, it initializes session history sync with a limit of `30` sessions by default
-- Unread monitoring: after initialization, continuous patrol is disabled by default and new messages are synced incrementally based on unread badges in the left-side session list
-- Precise sending: the browser script actively claims outgoing jobs and prioritizes locating the target conversation by `session_id` before sending
-- Auto-reply: the worker consumes `outbox.new_messages`, generates replies, and writes them into `outgoing_messages`
-- Project Chrome: `npm start` automatically launches a project-dedicated Chrome instance with remote debugging on port `18800`
-- Chrome proxy: supports configuring a dedicated proxy for the project Chrome instance through a local config file or environment variables
-- Log persistence: startup flow, Chrome, `sync.js`, the API, and the built-in worker all write logs to files
+- 当前推荐按职责拆分运行：`server` 负责服务端能力，`client` 负责本地 Chrome 客户端能力
+- `chrome_extension/` 和 `qianniu_capture/` 都属于浏览器侧模块，由客户端拉起的 Chrome 承载
+- 默认启动入口已经切换到当前 `.ts` 源码入口，`npm start` / `npm run worker:*` 可直接使用
 
-## Directory Layout
+## 功能概览
+
+- 实时采集闲鱼聊天会话与消息
+- 将千牛待发货订单同步到本地数据库，并尝试和会话做关联
+- 在本地控制台集中查看会话、订单、运行状态和待发送队列
+- 支持人工发送消息，也支持基于 LLM 的自动回复入队
+- 支持图片消息媒体缓存，避免前端直接依赖远端图片地址
+
+## 架构
 
 ```text
-goofishAggregation/
-├── qianniu_capture/
-│   └── qianniu_batch_consign.js # Tampermonkey script: capture Qianniu pending-shipment orders
-├── xianyu_capture/
-│   └── xianyu_monitor.js        # Tampermonkey script (current panel version 4.0)
-├── frontend/                    # React + TypeScript + Vite frontend source
-│   ├── package.json             # Frontend dependencies (React 18, Vite, TypeScript)
-│   ├── vite.config.ts           # Vite config: builds to server/public/, proxies /api to 3210
-│   ├── tsconfig.json            # TypeScript strict config
-│   ├── index.html               # Vite entry HTML
-│   └── src/
-│       ├── main.tsx             # ReactDOM entry
-│       ├── App.tsx              # Root layout: Header + Sidebar + ChatPanel + OrdersDrawer + Toast
-│       ├── types/api.ts         # TypeScript interfaces
-│       ├── services/            # Typed API fetch wrappers (settings, sessions, outgoing, orders)
-│       ├── context/             # AppContext (useReducer) + usePolling hook
-│       ├── hooks/               # useDebouncedValue, useCopyToClipboard, useToast
-│       ├── styles/              # CSS variables, global reset, shared button styles
-│       └── components/          # Header/, Sidebar/, ChatPanel/, OrdersDrawer/, Toast/
-├── server/
-│   ├── package.json             # Node dependencies and scripts
-│   ├── start.js                 # Unified launcher: Chrome + API + sync.js
-│   ├── index.js                 # Express API + static serving
-│   ├── db.js                    # SQLite data layer
-│   ├── sync.js                  # CDP sync daemon
-│   ├── auto_reply_worker.js     # Auto-reply worker
-│   ├── ai.js                    # LLM integration wrapper
-│   ├── public/                  # [generated] Vite build output served by Express
-│   ├── data.db                  # [generated] SQLite database
-│   ├── server.log               # [generated] launcher / Chrome / sync combined log
-│   └── server3210.log           # [generated] API and built-in worker log
-├── integrations/
-│   └── qianniu/                 # Reserved for future integrations
-└── agent_logs/                  # Collaboration logs
+Goofish Web IM
+  │
+  └── Chrome Extension ─────┐
+                            │ WSS RPC
+Qianniu Batch Consign       │
+  │                         ▼
+  └── Tampermonkey Script ─ Server
+                              ├── Express API
+                              ├── Browser WSS RPC
+                              ├── SQLite
+                              ├── Media Cache
+                              ├── Auto Reply Worker
+                              └── React Console (server/public)
 ```
 
-## Requirements
+## 目录说明
 
-- Node.js 20+ (the current machine uses Node 22)
-- Desktop Google Chrome
-- Tampermonkey extension
-- A logged-in Goofish Web session at `https://www.goofish.com/im`
+| 路径 | 角色 | 状态 |
+|---|---|---|
+| `server/` | 后端服务、WSS、数据库、自动回复 Worker、控制台静态资源 | 当前主链路 |
+| `server/frontend/` | React 控制台源码，构建后输出到 `server/public/` | 当前主链路 |
+| `client/` | 本地 Chrome 启动器、远程 WSS 注入、CDP 辅助同步 | 当前主链路 |
+| `chrome_extension/` | 闲鱼聊天采集与发送 Chrome 扩展 | 当前主链路 |
+| `qianniu_capture/` | 千牛订单采集 Tampermonkey 脚本 | 当前主链路 |
+| `xianyu_capture/` | 旧版闲鱼采集脚本 | 旧链路 |
+| `types/` | 共享类型声明 | 辅助目录 |
+| `integrations/` | 预留扩展目录 | 预留 |
 
-## Install Dependencies
+## 当前主链路启动
 
-### Backend
+### 1. 前置要求
+
+- Node.js 18 及以上
+- Chrome 浏览器
+- OpenSSL
+- Tampermonkey
+
+### 2. 安装依赖
 
 ```bash
-cd server
-npm ci
+cd server && npm ci && cd ..
+cd server/frontend && npm ci && cd ../..
+cd chrome_extension && npm ci && cd ..
 ```
 
-### Frontend
+### 3. 环境变量
+
+先准备本地配置文件：
 
 ```bash
-cd frontend
-npm ci
+cp server/.env.example server/.env
+cp client/.env.example client/.env
 ```
 
-To rebuild the frontend into `server/public/`:
+当前入口脚本已经内置 `.env` 自动加载逻辑，并且保留“显式传入的系统环境变量优先”这一规则：
+
+- `server/index.ts`、`server/auto_reply_worker.ts`、`server/ai.ts` 会加载 `server/.env`
+- `client/start.ts`、`client/sync.ts` 会加载 `client/.env`
+
+服务端常用变量如下：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PORT` | `3210` | HTTP API 端口 |
+| `SERVER_BIND_HOST` | `0.0.0.0` | HTTP / WSS 监听地址 |
+| `BROWSER_WSS_PORT` | `3211` | 浏览器脚本连接的 WSS 端口 |
+| `BROWSER_WSS_PATH` | `/ws/browser` | 浏览器 RPC 路径 |
+| `CORS_ALLOWED_ORIGINS` | 空 | 额外允许的来源，逗号分隔 |
+| `BROWSER_WSS_CERT_PATH` | 自动生成 | 自定义 TLS 证书路径 |
+| `BROWSER_WSS_KEY_PATH` | 自动生成 | 自定义 TLS 私钥路径 |
+| `BROWSER_WSS_CERT_SAN` | 空 | 追加 SAN，例如 `IP:192.168.1.100` |
+| `BROWSER_MEDIA_ORIGIN` | 自动推导 | 图片缓存的公开访问地址 |
+| `OPENAI_API_KEY` | 空 | 自动回复所需的 API Key |
+| `OPENAI_BASE_URL` | `https://api.openai.com` | LLM API Base URL |
+| `OPENAI_MODEL` | `gpt-4o` | 自动回复模型 |
+| `AUTO_REPLY_ENABLED` | `1` | 自动回复开关 |
+| `AUTO_REPLY_INTERVAL_MS` | `3000` | Worker 轮询间隔 |
+| `CRAWLER_DESIRED_ENABLED` | `1` | 期望浏览器巡逻状态 |
+
+客户端常用变量见 [`client/.env.example`](client/.env.example)。
+
+### 4. 构建前端和扩展
 
 ```bash
-cd frontend
-npm run build
+# 构建控制台，产物输出到 server/public/
+cd server/frontend && npm run build && cd ../..
+
+# 构建 Chrome 扩展，必须先生成 chrome_extension/dist/ 才能在浏览器里加载使用
+cd chrome_extension && npm run build && cd ..
 ```
 
-## How to Start
+### 5. 启动服务端
 
-### 1. Start the full stack with one command
+服务端只负责本地 API、WSS、数据库、媒体缓存、自动回复 Worker 和控制台静态资源：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-npm start
+cd server && npm start && cd ..
 ```
 
-By default this does all of the following:
+启动后默认会提供：
 
-- Uses the project Chrome directory `.chrome-xianyu-profile` inside the repository
-- Cleans transient cache and stale lock files from the project Chrome directory before startup, while keeping `Sessions` so the previous browser session and cookies can be restored
-- Starts Chrome in session-restore mode if previous session data exists in the profile, without reinjecting the initial URLs
-- Automatically opens `https://www.goofish.com/im` and `https://myseller.taobao.com/home.htm/batch-consign` if this is the first launch or the current profile has no recoverable session
-- Adds `--allow-insecure-localhost` to the project Chrome instance so scripts can connect to the locally self-signed `wss://localhost`
-- Opens the Chrome remote debugging port `18800`
-- Starts the API service at `127.0.0.1:3210`
-- Starts the browser-script WSS endpoint at `wss://localhost:3211/ws/browser`
-- Starts `sync.js`
-- Starts the built-in auto-reply worker
-- Monitors port `18800` and automatically relaunches the project Chrome instance if it is closed
+- 监听地址：`0.0.0.0`（由 `SERVER_BIND_HOST` 控制，默认值见 `server/.env.example`）
+- 本机访问 HTTP API：`http://localhost:3210` 或 `http://127.0.0.1:3210`
+- 本机访问 WSS RPC：`wss://localhost:3211/ws/browser`
+- 控制台静态资源：`server/public/`
 
-If you want to troubleshoot whether the proxy is causing Chrome startup failures, you can temporarily start it like this:
+如果 `server/public/` 不存在，服务端会尝试自动执行 `server/frontend` 的构建。
+
+### 6. 启动客户端
+
+客户端负责启动项目专用 Chrome、注入浏览器侧配置，并拉起本地浏览器辅助同步：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-CHROME_PROXY_DISABLED=1 npm start
+cd client && npm start && cd ..
 ```
 
-If you explicitly want to preserve the current cache state and skip the pre-start cleanup, you can temporarily disable it:
+如果只想单独运行浏览器辅助同步器，也可以执行：
 
 ```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-CHROME_CLEAR_TRANSIENT_DATA_ON_START=0 npm start
+cd client && npm run sync && cd ..
 ```
 
-### 2. Development mode
+### 7. 加载浏览器侧
 
-Backend (auto-restart on file changes):
+**闲鱼聊天 Chrome 扩展**
 
-```bash
-cd server
-npm run dev
+使用前必须先执行上一步构建，生成 `chrome_extension/dist/`。Chrome 扩展页面加载的是构建产物目录，不是源码目录。
+
+1. 打开 `chrome://extensions`
+2. 开启开发者模式
+3. 选择“加载已解压的扩展程序”
+4. 指向 `chrome_extension/dist`
+5. 打开 `https://www.goofish.com/im`
+
+**千牛订单 Tampermonkey 脚本**
+
+1. 在 Tampermonkey 中导入 `qianniu_capture/qianniu_batch_consign.js`
+2. 打开 `https://myseller.taobao.com/home.htm/batch-consign`
+
+### 8. 打开控制台
+
+访问 `http://localhost:3210`。
+
+## API 摘要
+
+以下接口来自 [`server/index.ts`](server/index.ts) 的当前实现：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `POST` | `/api/messages/ingest` | 批量写入聊天快照 |
+| `GET` | `/api/sessions` | 查询会话列表 |
+| `GET` | `/api/sessions/:chatKey/messages` | 查询单会话消息 |
+| `GET` | `/api/settings` | 读取运行时设置 |
+| `PATCH` | `/api/settings` | 更新自动回复 / 巡逻开关 / 初始遍历数量 |
+| `POST` | `/api/initial-crawl` | 请求浏览器重新做首轮会话遍历 |
+| `GET` | `/api/orders` | 查询订单列表 |
+| `GET` | `/api/orders/runtime` | 查询千牛侧运行状态 |
+| `POST` | `/api/orders/full-scan` | 请求千牛全量扫描 |
+| `POST` | `/api/orders/sync-now` | 请求千牛立即同步 |
+| `POST` | `/api/browser/heartbeat` | 浏览器脚本上报心跳 |
+| `POST` | `/api/outgoing-messages` | 手工或 AI 入队待发送消息 |
+| `GET` | `/api/outgoing-messages` | 查询待发送 / 已发送消息 |
+| `POST` | `/api/outgoing-messages/claim` | 浏览器脚本领取待发送消息 |
+| `PATCH` | `/api/outgoing-messages/:id` | 浏览器脚本回写发送结果 |
+
+## 数据、日志与构建产物
+
+| 路径 | 说明 |
+|---|---|
+| `server/data.db` | SQLite 数据库 |
+| `server/public/` | React 控制台构建产物 |
+| `server/public/media-cache/` | 图片缓存目录 |
+| `server/.localhost-wss/` | 自动生成的本地 TLS 证书 |
+| `server/*.log` | 服务端日志 |
+| `client/*.log` | 旧客户端链路日志 |
+
+## 开发阅读顺序
+
+1. [`server/index.ts`](server/index.ts)：后端入口、HTTP API、WSS RPC、启动流程
+2. [`server/db.ts`](server/db.ts)：SQLite 结构、入库逻辑、运行时状态管理
+3. [`server/auto_reply_worker.ts`](server/auto_reply_worker.ts)：自动回复处理循环
+4. [`server/frontend/src/App.tsx`](server/frontend/src/App.tsx)：控制台入口
+5. `chrome_extension/src/content_script/`：聊天采集、心跳、发送、WSS RPC
+6. [`qianniu_capture/qianniu_batch_consign.ts`](qianniu_capture/qianniu_batch_consign.ts)：订单采集与同步
+
+## 跨网络部署
+
+默认情况下，服务端会监听 `0.0.0.0`，并自动生成仅覆盖 `localhost` 与 `127.0.0.1` 的自签证书。如果浏览器脚本不在本机，需要额外处理证书 SAN、浏览器信任链和回连地址。
+
+服务端至少需要关注：
+
+- `BROWSER_WSS_CERT_SAN`
+- `BROWSER_WSS_CERT_PATH`
+- `BROWSER_WSS_KEY_PATH`
+- `CORS_ALLOWED_ORIGINS`
+- `BROWSER_MEDIA_ORIGIN`
+
+浏览器脚本侧当前统一支持通过页面 `localStorage` 的 `xm_server_wss_url` 覆写 WSS 地址。
+
+如果你使用 `client/start.ts`，并设置了 `SERVER_HOST`，启动器会自动把该地址注入到闲鱼页和千牛页。
+
+如果你是手工部署，需要在对应页面各自执行一次：
+
+```js
+localStorage.setItem('xm_server_wss_url', 'wss://192.168.1.100:3211/ws/browser');
 ```
 
-Frontend (Vite dev server with HMR, proxies `/api` to port 3210):
+注意：`localStorage` 按页面来源隔离，`goofish.com` 和 `myseller.taobao.com` 需要分别设置。
 
-```bash
-cd frontend
-npm run dev
-```
+服务端当前没有认证层，不应直接暴露到公网。
 
-Open `http://localhost:5173` for the frontend dev server. API requests are proxied to the backend at port 3210.
+## 常用命令
 
-### 3. Run the worker separately
+| 命令 | 说明 |
+|---|---|
+| `cd server && npm start && cd ..` | 启动纯服务端链路 |
+| `cd server && npm run dev && cd ..` | watch 模式启动纯服务端链路 |
+| `cd server/frontend && npm run dev && cd ../..` | 本地调试 React 控制台 |
+| `cd server/frontend && npm run build && cd ../..` | 构建控制台到 `server/public/` |
+| `cd client && npm start && cd ..` | 启动本地 Chrome 客户端 |
+| `cd client && npm run sync && cd ..` | 单独运行客户端辅助同步器 |
+| `cd chrome_extension && npm run dev && cd ..` | watch 模式构建扩展 |
+| `cd chrome_extension && npm run build && cd ..` | 生产构建扩展 |
+| `node server/auto_reply_worker.ts --once` | 单轮执行自动回复 |
+| `node server/auto_reply_worker.ts --dry-run --once` | 单轮 dry-run 自动回复 |
 
-Use this only for debugging:
+## 已知问题
 
-```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-npm run worker
-npm run worker:dry
-npm run worker:once
-npm run worker:dry:once
-```
+- `xianyu_capture/` 仍属于旧链路目录；当前浏览器侧主链路以 `client/ + chrome_extension/ + qianniu_capture/` 为准
+- 跨网络部署依赖自签证书信任、CORS 和两侧页面的 WSS 覆写地址，落地前需要逐项确认
 
-Notes:
+## 许可证
 
-- `npm start` already launches the built-in worker
-- Do not run `npm run worker` in parallel with `npm start`, or multiple workers may consume the same `outbox` events concurrently
-
-## Browser-Side Setup
-
-### 1. Install and enable Tampermonkey
-
-Install the Tampermonkey extension in Chrome.
-
-### 2. Import the Tampermonkey scripts
-
-Import and enable:
-
-- [xianyu_capture/xianyu_monitor.js](xianyu_capture/xianyu_monitor.js)
-- [qianniu_capture/qianniu_batch_consign.js](qianniu_capture/qianniu_batch_consign.js)
-
-The current Goofish script panel version is `4.0`, and the Qianniu order script version is `1.4`. After each script update, make sure the version text inside Tampermonkey is updated as well.
-After importing the Qianniu order script for the first time, allow it to access `trade.taobao.com` so it can fetch the product ID from the `tradeSnap` page.
-
-The control channel between the scripts and the local service no longer relies on high-frequency HTTP polling and now uses a single long-lived connection:
-
-- `wss://localhost:3211/ws/browser`
-
-At startup, the project automatically generates a local development certificate for localhost and configures the project Chrome instance to trust the self-signed localhost certificate.
-
-### 3. Log in to Goofish / Qianniu Web
-
-After completing one login in the project Chrome instance, subsequent launches will try to restore the previous session:
-
-- [goofish.com/im](https://www.goofish.com/im)
-- [myseller.taobao.com/home.htm/batch-consign](https://myseller.taobao.com/home.htm/batch-consign)
-
-Notes:
-
-- The Goofish message script runs on `goofish.com/im`
-- The Qianniu order script runs on `batch-consign`
-- The Qianniu script caches decrypted buyer info by `orderId`; once an order has been decrypted successfully, it will not click "decrypt" again for that order later
-- On first launch or when using a brand-new profile, the launcher automatically opens both the Goofish and Qianniu entry pages
-- If the current profile already contains the previous session, the launcher restores the original tabs and cookies, so you usually do not need to manually reopen the Qianniu page
-
-By default, the scripts first perform a startup initialization pass: they iterate through the first `30` sessions and try to pull back recent history, then automatically stop continuous patrol.
-
-After initialization:
-
-- The currently open session continues lightweight syncing
-- Sessions with unread badges in the left-side list are opened on demand and synced incrementally
-- Full traversal is reserved for manually enabled patrol mode and precise-send fallback only
-
-## 3210 Console Overview
-
-Open:
-
-- [http://127.0.0.1:3210](http://127.0.0.1:3210)
-
-The current UI supports:
-
-- Incremental refresh for the left-side session list to reduce polling flicker
-- Active refresh for the message panel on the right, so new messages in the current session appear without re-clicking the session on the left
-- Order drawer in the top bar: inspect Qianniu pending-shipment orders, matching status, and script runtime state, and trigger current-page sync or a manual full scan
-- AI toggle in the top bar: globally enable or disable auto-replies
-- Patrol toggle in the top bar: remotely control background Tampermonkey patrol and show script sync status
-- Manual reply input on the right: messages enter the `pending` queue first and are then sent by the browser
-- Outgoing queue panel: distinguishes `AI` and `manual` message sources
-- Order summary at the top of the chat: precisely matched orders are shown above the corresponding conversation
-
-## Environment Variables and Local Configuration
-
-### AI / API
-
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
-- `AUTO_REPLY_ENABLED`
-- `AUTO_REPLY_INTERVAL_MS`
-
-Current behavior:
-
-- `AUTO_REPLY_ENABLED=0` initializes the runtime AI toggle as disabled
-- The built-in worker still starts, but skips auto-reply generation
-
-### Chrome / Launcher
-
-- `PORT`: local API port, default `3210`
-- `BROWSER_WSS_PORT`: browser-script WSS port, default `3211`
-- `BROWSER_WSS_PATH`: browser-script WSS path, default `/ws/browser`
-- `BROWSER_WSS_CERT_PATH`: optional custom localhost WSS certificate path
-- `BROWSER_WSS_KEY_PATH`: optional custom localhost WSS private key path
-- `CDP_PORT`: Chrome DevTools remote debugging port, default `18800`
-- `SYNC_INTERVAL`: `sync.js` polling interval, default `5000`
-- `CHROME_PROFILE_NAME`: profile name shown in logs, default `xianyu`
-- `CHROME_PROFILE_DIRECTORY`: profile directory name inside the project Chrome directory, default `Default`
-- `CHROME_USER_DATA_DIR`: project Chrome user-data directory, default `.chrome-xianyu-profile` under the repository root
-- `GOOFISH_URL`: default Goofish page opened on first launch, default `https://www.goofish.com/im`
-- `QIANNIU_URL`: default Qianniu page opened on first launch, default `https://myseller.taobao.com/home.htm/batch-consign`
-- `CHROME_MONITOR_INTERVAL_MS`: Chrome watchdog interval, default `3000`
-- `CHROME_CLEAR_TRANSIENT_DATA_ON_START`: whether to clear transient cache from the project Chrome directory before startup; enabled by default while preserving `Sessions` for session restore, set to `0` to disable
-- `CHROME_START_TIMEOUT_MS`: timeout for waiting for Chrome to expose the CDP port, default `15000`
-
-### Chrome Proxy
-
-- `CHROME_PROXY_SERVER`
-- `CHROME_PROXY_USERNAME`
-- `CHROME_PROXY_PASSWORD`
-- `CHROME_PROXY_BYPASS_LIST`
-- `CHROME_PROXY_CONFIG_PATH`
-
-By default the launcher first tries to read the local file:
-
-- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
-
-Example:
-
-```json
-{
-  "proxyServer": "http://127.0.0.1:7890",
-  "proxyUsername": "",
-  "proxyPassword": "",
-  "proxyBypassList": "localhost;127.0.0.1;::1"
-}
-```
-
-Notes:
-
-- The proxy only affects the project Chrome instance launched by this repository and does not affect your normal Chrome instances
-- If the proxy requires a username and password, the launcher automatically generates a local authentication extension in `server/.chrome-proxy-extension/`
-- Both the local file and that generated directory are ignored by `.gitignore`
-
-### Notes on custom Chrome directories
-
-If you customize `CHROME_USER_DATA_DIR`:
-
-- For a brand-new empty directory, it is best to also set `CHROME_PROFILE_DIRECTORY` explicitly
-- If you pass only `CHROME_USER_DATA_DIR` without `CHROME_PROFILE_DIRECTORY`, the current launcher tries to parse the profile from `Local State`; startup fails when that file does not exist in an empty directory
-
-## Log Files
-
-Default log locations:
-
-- [server/server.log](server/server.log)
-  - Launcher logs
-  - Chrome output
-  - `sync.js` output
-- [server/server3210.log](server/server3210.log)
-  - API service logs
-  - Built-in worker logs
-
-## Database and Queues
-
-Core tables:
-
-- `sessions`: primary session table
-- `messages`: chat messages
-- `outbox`: internal event bus (`new_session` / `new_messages`)
-- `outgoing_messages`: outgoing message queue (`pending / sending / sent / failed`)
-- `app_settings`: runtime settings such as the AI toggle
-
-The current sending pipeline is:
-
-1. New messages enter `outbox`
-2. The worker generates a reply and writes it to `outgoing_messages.pending`
-3. The browser sender loop atomically claims one outgoing job
-4. It first tries to locate the target session precisely by `session_id`; if that fails, it performs a limited fallback traversal and backfill
-5. The browser automatically fills the input and sends the message
-6. Right after sending, the current session is resynced so the new message is written back to the local cache promptly
-7. The API writes the final status back as `sent` or `failed`
-
-## FAQ
-
-### 1. `3210` shows data, but the message panel on the right does not update
-
-Refresh the browser page once to ensure you have the latest frontend script. The current version already supports active refresh for the current session.
-
-### 2. The database contains "empty sessions" with only a buyer name and no messages
-
-The backend now blocks empty snapshots at the `ingest()` layer, so this kind of empty shell is no longer written into `sessions`. If old records still exist, clean up those historical dirty rows manually from the database.
-
-### 3. What if the project Chrome instance gets closed
-
-If it was started by `npm start`, the watchdog monitors port `18800` and automatically relaunches the project Chrome instance after it is closed.
-
-### 4. How do I switch the proxy
-
-Edit:
-
-- [server/.chrome-proxy.local.json](server/.chrome-proxy.local.json)
-
-Then restart:
-
-```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-npm start
-```
-
-If you want to temporarily bypass the proxy for troubleshooting, use:
-
-```bash
-cd /Users/snoopy/Desktop/goofishAggregation/server
-CHROME_PROXY_DISABLED=1 npm start
-```
-
-## Current Known Limitations
-
-- The launcher currently supports only one project Chrome instance, so it cannot safely aggregate multiple seller accounts into the same `3210` console yet
-- `server/ai.js` still keeps a default API key fallback, which is not recommended for production use
-- `outbox` events are currently processed and marked afterward, so running multiple workers at the same time may cause duplicate consumption
-- Precise sending still depends on `sessionInfo.sessionId` being readable inside the Goofish page; if the page structure changes, it falls back to limited traversal and backfill
-
-## Next Development Plan
-
-The items below are not implemented yet and are kept as future work.
-
-### 0. Solution document (continuously evolving)
-
-The ongoing evolution plan for multi-account / multi-store aggregation, multi-worker scheduling, and precise sending is maintained in:
-
-- [docs/multi-shop-aggregation-evolution.md](docs/multi-shop-aggregation-evolution.md)
-
-Notes:
-
-- The README keeps only the entry point, scope, and status instead of repeating the full design
-- If new decisions, assumptions, or TODO changes are added later, update that document first and sync the README summary only when needed
-
-### 1. Multiple Chrome instances and multiple proxies
-
-Goals:
-
-- Support launching multiple project Chrome instances at the same time
-- Allow each instance to configure its own `userDataDir`, `profileDirectory`, `cdpPort`, and proxy independently
-- Let the same `3210` console display aggregated data from multiple instances
-
-Planned refactor scope:
-
-- `server/start.js`
-  - Refactor from the current single-instance mode to an instance-list-driven model
-  - Maintain a separate watchdog, Chrome process, and proxy config for each instance
-- `server/sync.js`
-  - Refactor to "one sync process per instance"
-  - Include `instanceId` when reporting data
-- `xianyu_capture/xianyu_monitor.js`
-  - Include instance identifiers in session snapshots, outgoing-message matching, and send-status writeback
-- `server/db.js`
-  - Add `instance_id` / `account_id` dimensions to `sessions`, `messages`, `outbox`, and `outgoing_messages`
-  - Avoid `chat_key` collisions across different Chrome instances or seller accounts
-- `server/index.js` and `server/public/`
-  - Show the source instance for each session in the UI
-  - Add filtering or switching by instance
-
-Current status:
-
-- The codebase only has a startup-layer foundation that could be extended to multi-instance support in the future
-- If you force multiple Chrome instances to write into the same database today, you risk session mix-ups, outgoing-message cross-send issues, and UI confusion
+本项目基于 [Apache-2.0](LICENSE) 开源。

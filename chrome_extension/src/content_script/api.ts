@@ -117,7 +117,7 @@ export function connectBrowserApiSocket(): Promise<WebSocket> {
 
     browserApiState.manualClose = false;
     browserApiState.connectPromise = new Promise<WebSocket>((resolve, reject) => {
-        // 支持远程部署：client/start.js 可通过 CDP 将远程 WSS 地址注入 localStorage
+        // 支持远程部署：client/start.ts 可通过 CDP 将远程 WSS 地址注入 localStorage
         const apiWsUrl = localStorage.getItem('xm_server_wss_url') || CONFIG.apiWebSocketUrl;
         const socket = new WebSocket(apiWsUrl);
         let settled = false;

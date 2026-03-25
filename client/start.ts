@@ -1,3 +1,4 @@
+// @ts-nocheck
 'use strict';
 
 const fs = require('fs');
@@ -5,6 +6,11 @@ const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 const { WebSocket } = require('ws');
+const { loadOptionalEnvFiles } = require('../load_env.ts');
+
+loadOptionalEnvFiles([
+  path.join(__dirname, '.env'),
+]);
 
 const DEFAULT_CDP_PORT = 18800;
 const DEFAULT_SYNC_INTERVAL = 5000;
@@ -58,21 +64,74 @@ const TAMPERMONKEY_CANONICAL_WEBREQUEST_EVENTS = [
   'webRequest.onErrorOccurred/s4',
 ];
 
-const children = [];
+import type { ChildProcess, SpawnOptions } from 'child_process';
+
+interface ClientConfig {
+  watch: boolean;
+  cdpPort: number;
+  syncInterval: number;
+  chromeProfileName: string;
+  chromeProfileDirectory: string;
+  chromeUserDataDir: string;
+  chromeMonitorIntervalMs: number;
+  goofishUrl: string;
+  qianniuUrl: string;
+  runtimeLogPath: string;
+  chromeProxyDisabled: boolean;
+  chromeProxyServer: string;
+  chromeProxyScheme: string;
+  chromeProxyUsername: string;
+  chromeProxyPassword: string;
+  chromeProxyBypassList: string;
+  chromeProxyExtensionDir: string;
+  chromeClearTransientDataOnStart: boolean;
+  chromeStartTimeoutMs: number;
+  chromeRepairTampermonkeyWebRequestOnStart: boolean;
+  tampermonkeyWebRequestEventThreshold: number;
+  serverHost: string;
+  browserWssPort: number;
+}
+
+interface ChromeProfile {
+  profileDirectory: string;
+  displayName: string;
+}
+
+interface NormalizedProxy {
+  serverArg: string;
+  host: string;
+  port: number;
+  scheme: string;
+}
+
+interface ProxyArgs {
+  args: string[];
+  extensionDirs: string[];
+  logMessage: string | null;
+}
+
+interface CompactResult {
+  changed: boolean;
+  removedKeys: number;
+  beforeCount: number;
+  afterCount: number;
+}
+
+const children: ChildProcess[] = [];
 let shuttingDown = false;
-let runtimeLogStream = null;
-let chromeWatchTimer = null;
+let runtimeLogStream: NodeJS.WritableStream | null = null;
+let chromeWatchTimer: ReturnType<typeof setInterval> | null = null;
 let chromeEnsuring = false;
 
 // ── 基础设施 ──────────────────────────────────────────────────────
 
-function parseArgs(argv) {
+function parseArgs(argv: string[]) {
   return {
     watch: argv.includes('--watch'),
   };
 }
 
-function writeToStreamSafely(stream, chunk) {
+function writeToStreamSafely(stream: NodeJS.WritableStream | null, chunk: string | Buffer) {
   if (!stream || stream.destroyed || stream.writableEnded === true || stream.writable === false) {
     return;
   }
@@ -84,17 +143,17 @@ function writeToStreamSafely(stream, chunk) {
   }
 }
 
-function log(message) {
+function log(message: string) {
   const line = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] [client] ${message}\n`;
   process.stdout.write(line);
   writeToStreamSafely(runtimeLogStream, line);
 }
 
-function setupLogStreams(config) {
+function setupLogStreams(config: ClientConfig) {
   runtimeLogStream = fs.createWriteStream(config.runtimeLogPath, { flags: 'a' });
 }
 
-function readLocalJsonConfig(filePath) {
+function readLocalJsonConfig(filePath: string): Record<string, any> {
   if (!filePath || !fs.existsSync(filePath)) {
     return {};
   }
@@ -107,7 +166,7 @@ function readLocalJsonConfig(filePath) {
   return JSON.parse(raw);
 }
 
-function attachChildOutput(child, targets) {
+function attachChildOutput(child: ChildProcess, targets: NodeJS.WritableStream[]) {
   if (child.stdout) {
     child.stdout.on('data', (chunk) => {
       process.stdout.write(chunk);
@@ -127,7 +186,11 @@ function attachChildOutput(child, targets) {
   }
 }
 
-function spawnChild(command, args, options = {}) {
+function spawnChild(
+  command: string,
+  args: string[],
+  options: SpawnOptions & { logTargets?: NodeJS.WritableStream[] } = {}
+): ChildProcess {
   const { logTargets = [], ...spawnOptions } = options;
   const child = spawn(command, args, {
     cwd: __dirname,
@@ -138,7 +201,7 @@ function spawnChild(command, args, options = {}) {
 
   attachChildOutput(child, logTargets);
   children.push(child);
-  child.once('exit', (code, signal) => {
+  child.once('exit', (code: number | null, signal: string | null) => {
     if (!shuttingDown && code && code !== 0) {
       log(`${path.basename(command)} 退出异常: code=${code} signal=${signal || 'none'}`);
     }
@@ -147,11 +210,11 @@ function spawnChild(command, args, options = {}) {
   return child;
 }
 
-function sleep(ms) {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isPortOpen(port) {
+function isPortOpen(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.createConnection({ host: '127.0.0.1', port });
     socket.once('connect', () => {
@@ -162,7 +225,7 @@ function isPortOpen(port) {
   });
 }
 
-async function waitForPort(port, timeoutMs) {
+async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await isPortOpen(port)) return true;
@@ -173,7 +236,7 @@ async function waitForPort(port, timeoutMs) {
 
 // ── Chrome 启动 ───────────────────────────────────────────────────
 
-function getChromeLaunchBase() {
+function getChromeLaunchBase(): { command: string; baseArgs: string[] } {
   switch (process.platform) {
     case 'darwin':
       return {
@@ -193,7 +256,10 @@ function getChromeLaunchBase() {
   }
 }
 
-function normalizeChromeProxyServer(rawProxyServer, defaultScheme) {
+function normalizeChromeProxyServer(
+  rawProxyServer: string,
+  defaultScheme: string
+): NormalizedProxy | null {
   if (!rawProxyServer) {
     return null;
   }
@@ -211,11 +277,11 @@ function normalizeChromeProxyServer(rawProxyServer, defaultScheme) {
   };
 }
 
-function hasChromeProxy(config) {
+function hasChromeProxy(config: ClientConfig): boolean {
   return !!config.chromeProxyServer;
 }
 
-function ensureChromeProxyExtension(config) {
+function ensureChromeProxyExtension(config: ClientConfig): string | null {
   if (!config.chromeProxyUsername || !config.chromeProxyPassword) {
     return null;
   }
@@ -281,7 +347,7 @@ chrome.webRequest.onAuthRequired.addListener(
   return config.chromeProxyExtensionDir;
 }
 
-function buildChromeProxyArgs(config) {
+function buildChromeProxyArgs(config: ClientConfig): ProxyArgs {
   if (!hasChromeProxy(config)) {
     return { args: [], extensionDirs: [], logMessage: null };
   }
@@ -295,7 +361,7 @@ function buildChromeProxyArgs(config) {
   }
 
   const args = [`--proxy-server=${normalizedProxy.serverArg}`];
-  const extensionDirs = [];
+  const extensionDirs: string[] = [];
   if (config.chromeProxyBypassList) {
     args.push(`--proxy-bypass-list=${config.chromeProxyBypassList}`);
   }
@@ -312,7 +378,7 @@ function buildChromeProxyArgs(config) {
   };
 }
 
-function resolveChromeProfile(userDataRoot, profileName) {
+function resolveChromeProfile(userDataRoot: string, profileName: string): ChromeProfile {
   const localStatePath = path.join(userDataRoot, 'Local State');
   const raw = fs.readFileSync(localStatePath, 'utf8');
   const localState = JSON.parse(raw);
@@ -330,11 +396,11 @@ function resolveChromeProfile(userDataRoot, profileName) {
   throw new Error(`未找到名为 "${profileName}" 的 Chrome profile`);
 }
 
-function ensureChromeUserDataDir(userDataRoot) {
+function ensureChromeUserDataDir(userDataRoot: string) {
   fs.mkdirSync(userDataRoot, { recursive: true });
 }
 
-function removePathIfExists(targetPath) {
+function removePathIfExists(targetPath: string): boolean {
   if (!targetPath || !fs.existsSync(targetPath)) {
     return false;
   }
@@ -348,8 +414,8 @@ function removePathIfExists(targetPath) {
   return true;
 }
 
-function clearChromeSingletonArtifacts(userDataRoot) {
-  const removed = [];
+function clearChromeSingletonArtifacts(userDataRoot: string): string[] {
+  const removed: string[] = [];
   for (const entry of CHROME_SINGLETON_ARTIFACTS) {
     const targetPath = path.join(userDataRoot, entry);
     if (removePathIfExists(targetPath)) {
@@ -359,7 +425,7 @@ function clearChromeSingletonArtifacts(userDataRoot) {
   return removed;
 }
 
-function clearChromeTransientData(config, profile) {
+function clearChromeTransientData(config: ClientConfig, profile: ChromeProfile) {
   const removed = clearChromeSingletonArtifacts(config.chromeUserDataDir);
   if (!config.chromeClearTransientDataOnStart) {
     if (removed.length > 0) {
@@ -390,7 +456,7 @@ function clearChromeTransientData(config, profile) {
 
 // ── Tampermonkey 修复 ─────────────────────────────────────────────
 
-function isTampermonkeyExtensionSetting(extensionSetting = {}) {
+function isTampermonkeyExtensionSetting(extensionSetting: Record<string, any> = {}): boolean {
   const manifest = extensionSetting.manifest || {};
   const nameText = [
     manifest.name,
@@ -415,11 +481,14 @@ function isTampermonkeyExtensionSetting(extensionSetting = {}) {
     && serviceWorkerEvents.includes('webRequest.onResponseStarted/s3');
 }
 
-function getServiceWorkerEventBaseKey(eventKey) {
+function getServiceWorkerEventBaseKey(eventKey: string): string {
   return String(eventKey || '').replace(/\/s\d+$/, '');
 }
 
-function selectCanonicalFilteredEventValue(entries, preferredKey) {
+function selectCanonicalFilteredEventValue(
+  entries: { key: string; value: any }[],
+  preferredKey: string
+): any[] {
   if (!Array.isArray(entries) || entries.length === 0) {
     return [];
   }
@@ -442,7 +511,7 @@ function selectCanonicalFilteredEventValue(entries, preferredKey) {
   return shortestKeyEntry.value;
 }
 
-function writeJsonFileAtomically(filePath, payload) {
+function writeJsonFileAtomically(filePath: string, payload: any) {
   const tempPath = `${filePath}.${process.pid}.tmp`;
   const fileMode = fs.existsSync(filePath) ? fs.statSync(filePath).mode : 0o600;
   fs.writeFileSync(tempPath, JSON.stringify(payload));
@@ -450,7 +519,7 @@ function writeJsonFileAtomically(filePath, payload) {
   fs.renameSync(tempPath, filePath);
 }
 
-function buildBackupTimestamp() {
+function buildBackupTimestamp(): string {
   const now = new Date();
   const parts = [
     now.getFullYear(),
@@ -464,13 +533,16 @@ function buildBackupTimestamp() {
   return parts.join('');
 }
 
-function backupFileBeforeRepair(filePath) {
+function backupFileBeforeRepair(filePath: string): string {
   const backupPath = `${filePath}.bak.tm-webrequest-repair.${buildBackupTimestamp()}`;
   fs.copyFileSync(filePath, backupPath);
   return backupPath;
 }
 
-function compactFilteredWebRequestEvents(extensionSetting, threshold) {
+function compactFilteredWebRequestEvents(
+  extensionSetting: Record<string, any>,
+  threshold: number
+): CompactResult {
   const filteredEvents = extensionSetting?.filtered_service_worker_events;
   if (!filteredEvents || typeof filteredEvents !== 'object' || Array.isArray(filteredEvents)) {
     return { changed: false, removedKeys: 0, beforeCount: 0, afterCount: 0 };
@@ -487,7 +559,7 @@ function compactFilteredWebRequestEvents(extensionSetting, threshold) {
     };
   }
 
-  const groupedEntries = new Map();
+  const groupedEntries = new Map<string, { key: string; value: any }[]>();
   for (const eventKey of webRequestKeys) {
     const baseKey = getServiceWorkerEventBaseKey(eventKey);
     if (!groupedEntries.has(baseKey)) {
@@ -499,7 +571,7 @@ function compactFilteredWebRequestEvents(extensionSetting, threshold) {
     });
   }
 
-  const nextFilteredEvents = {};
+  const nextFilteredEvents: Record<string, any> = {};
   for (const [eventKey, value] of Object.entries(filteredEvents)) {
     if (!eventKey.startsWith('webRequest.')) {
       nextFilteredEvents[eventKey] = value;
@@ -509,7 +581,7 @@ function compactFilteredWebRequestEvents(extensionSetting, threshold) {
   const canonicalKeys = Array.isArray(extensionSetting.serviceworkerevents)
     ? extensionSetting.serviceworkerevents.filter((eventKey) => eventKey.startsWith('webRequest.'))
     : TAMPERMONKEY_CANONICAL_WEBREQUEST_EVENTS;
-  const usedBaseKeys = new Set();
+  const usedBaseKeys = new Set<string>();
 
   for (const canonicalKey of canonicalKeys) {
     const baseKey = getServiceWorkerEventBaseKey(canonicalKey);
@@ -550,7 +622,10 @@ function compactFilteredWebRequestEvents(extensionSetting, threshold) {
   };
 }
 
-function clearSecurePreferenceProtectionForExtension(securePreferences, extensionId) {
+function clearSecurePreferenceProtectionForExtension(
+  securePreferences: Record<string, any>,
+  extensionId: string
+) {
   const extensionProtection = securePreferences?.protection?.macs?.extensions;
   if (extensionProtection?.settings && extensionId in extensionProtection.settings) {
     delete extensionProtection.settings[extensionId];
@@ -566,7 +641,7 @@ function clearSecurePreferenceProtectionForExtension(securePreferences, extensio
   }
 }
 
-function repairTampermonkeyWebRequestExplosion(config, profile) {
+function repairTampermonkeyWebRequestExplosion(config: ClientConfig, profile: ChromeProfile) {
   if (!config.chromeRepairTampermonkeyWebRequestOnStart) {
     return;
   }
@@ -593,7 +668,13 @@ function repairTampermonkeyWebRequestExplosion(config, profile) {
     return;
   }
 
-  const repairSummaries = [];
+  const repairSummaries: {
+    extensionId: string;
+    removedKeys: number;
+    beforeCount: number;
+    afterCount: number;
+    name: string;
+  }[] = [];
   for (const [extensionId, extensionSetting] of Object.entries(extensionSettings)) {
     if (!isTampermonkeyExtensionSetting(extensionSetting)) {
       continue;
@@ -634,7 +715,7 @@ function repairTampermonkeyWebRequestExplosion(config, profile) {
 
 // ── Chrome 生命周期 ───────────────────────────────────────────────
 
-function terminateChromeChild(child, reason) {
+function terminateChromeChild(child: ChildProcess | null, reason: string) {
   if (!child || child.killed) {
     return;
   }
@@ -647,7 +728,7 @@ function terminateChromeChild(child, reason) {
   }
 }
 
-function getChromeProfile(config) {
+function getChromeProfile(config: ClientConfig): ChromeProfile {
   if (config.chromeProfileDirectory) {
     return {
       profileDirectory: config.chromeProfileDirectory,
@@ -658,7 +739,7 @@ function getChromeProfile(config) {
   return resolveChromeProfile(config.chromeUserDataDir, config.chromeProfileName);
 }
 
-function buildChromeStartupUrls(config) {
+function buildChromeStartupUrls(config: ClientConfig): string[] {
   const urls = [
     config.goofishUrl,
     config.qianniuUrl,
@@ -669,7 +750,7 @@ function buildChromeStartupUrls(config) {
   return [...new Set(urls)];
 }
 
-function hasPreviousSessionData(chromeUserDataDir, profileDirectory) {
+function hasPreviousSessionData(chromeUserDataDir: string, profileDirectory: string): boolean {
   const sessionsDir = path.join(chromeUserDataDir, profileDirectory, 'Sessions');
   if (!fs.existsSync(sessionsDir)) {
     return false;
@@ -683,7 +764,7 @@ function hasPreviousSessionData(chromeUserDataDir, profileDirectory) {
   }
 }
 
-async function launchChromeAttempt(config) {
+async function launchChromeAttempt(config: ClientConfig) {
   ensureChromeUserDataDir(config.chromeUserDataDir);
   const profile = getChromeProfile(config);
   clearChromeTransientData(config, profile);
@@ -723,7 +804,7 @@ async function launchChromeAttempt(config) {
   return { child, profile, ready };
 }
 
-async function ensureChromeDebugging(config) {
+async function ensureChromeDebugging(config: ClientConfig): Promise<void> {
   const alreadyListening = await isPortOpen(config.cdpPort);
   if (alreadyListening) {
     log(`检测到 Chrome 已监听 ${config.cdpPort}，跳过重复拉起`);
@@ -742,7 +823,7 @@ async function ensureChromeDebugging(config) {
   throw new Error(`Chrome 未在 ${config.chromeStartTimeoutMs}ms 内开放 ${config.cdpPort} 调试端口`);
 }
 
-function startChromeWatchdog(config) {
+function startChromeWatchdog(config: ClientConfig) {
   if (chromeWatchTimer) {
     clearInterval(chromeWatchTimer);
   }
@@ -775,11 +856,8 @@ function startChromeWatchdog(config) {
 
 /**
  * 通过 CDP 在指定 tab 中执行 JS 表达式。
- * @param {string} wsDebuggerUrl - tab 的 WebSocket 调试地址。
- * @param {string} expression - 要执行的 JS 表达式。
- * @returns {Promise<void>}
  */
-function cdpEval(wsDebuggerUrl, expression) {
+function cdpEval(wsDebuggerUrl: string, expression: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsDebuggerUrl);
     let done = false;
@@ -822,11 +900,8 @@ function cdpEval(wsDebuggerUrl, expression) {
 
 /**
  * 通过 CDP 向匹配 URL 片段的 tab 注入 JS 表达式。
- * @param {number} cdpPort - CDP 端口。
- * @param {string} urlFragment - 要匹配的 URL 片段。
- * @param {string} expression - 要执行的 JS 表达式。
  */
-async function injectToTab(cdpPort, urlFragment, expression) {
+async function injectToTab(cdpPort: number, urlFragment: string, expression: string): Promise<void> {
   try {
     const res = await fetch(`http://127.0.0.1:${cdpPort}/json`);
     if (!res.ok) return;
@@ -842,9 +917,8 @@ async function injectToTab(cdpPort, urlFragment, expression) {
 
 /**
  * 如果设置了 SERVER_HOST，通过 CDP 向目标页面注入远程 WSS 地址到 localStorage。
- * @param {{cdpPort: number, serverHost: string, browserWssPort: number}} config
  */
-async function injectWssConfig(config) {
+async function injectWssConfig(config: ClientConfig): Promise<void> {
   if (!config.serverHost) return;
 
   const wssUrl = `wss://${config.serverHost}:${config.browserWssPort}/ws/browser`;
@@ -858,7 +932,7 @@ async function injectWssConfig(config) {
 
 // ── 退出处理 ──────────────────────────────────────────────────────
 
-function shutdown(signal) {
+function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`收到 ${signal}，准备停止所有子进程`);
@@ -887,7 +961,7 @@ function shutdown(signal) {
 
 // ── 主入口 ────────────────────────────────────────────────────────
 
-async function main() {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const chromeProxyConfigPath =
     process.env.CHROME_PROXY_CONFIG_PATH || DEFAULT_CHROME_PROXY_CONFIG_PATH;
@@ -897,7 +971,7 @@ async function main() {
   const rawTampermonkeyThreshold = Number(process.env.CHROME_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD);
   const serverUrl = process.env.SERVER_URL || 'http://127.0.0.1:3210';
 
-  const config = {
+  const config: ClientConfig = {
     watch: args.watch,
     cdpPort: Number(process.env.CDP_PORT || DEFAULT_CDP_PORT),
     syncInterval: Number(process.env.SYNC_INTERVAL || DEFAULT_SYNC_INTERVAL),
@@ -959,8 +1033,8 @@ async function main() {
   await injectWssConfig(config);
   startChromeWatchdog(config);
 
-  log(`启动 sync.js，连接 CDP ${config.cdpPort}，同步到 ${serverUrl}`);
-  spawnChild(process.execPath, ['sync.js'], {
+  log(`启动 sync.ts，连接 CDP ${config.cdpPort}，同步到 ${serverUrl}`);
+  spawnChild(process.execPath, ['sync.ts'], {
     env: {
       ...process.env,
       SERVER_URL: serverUrl,
