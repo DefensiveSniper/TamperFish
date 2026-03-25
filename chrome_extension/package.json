@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "ENTRY=content_script vite build && ENTRY=background vite build && ENTRY=popup vite build",
-    "dev": "ENTRY=content_script vite build --watch"
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch --entry content_script"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",
