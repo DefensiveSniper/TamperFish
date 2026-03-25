@@ -2,6 +2,8 @@
 .chrome-xianyu-profile/
 .chrome-proxy-extension/
 .claude/
+.github/
+.vscode/
 agent_logs/
 docs/
 node_modules/
@@ -15,3 +17,4 @@ server/*.pid
 client/.chrome-proxy.local.json
 client/.chrome-proxy-extension/
 client/*.log
+/tasks/
