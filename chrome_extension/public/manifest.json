@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "闲鱼消息监控 TamperFish",
-  "version": "4.2",
+  "version": "4.3",
   "description": "监控闲鱼网页版消息，支持精准发送、后台巡逻远程控制与数据持久化",
-  "permissions": ["storage", "sidePanel", "scripting", "tabs"],
+  "permissions": ["storage", "scripting", "tabs"],
   "host_permissions": [
     "https://www.goofish.com/*",
     "wss://localhost:3211/*",
@@ -19,9 +19,6 @@
   ],
   "background": {
     "service_worker": "background.js"
-  },
-  "side_panel": {
-    "default_path": "side_panel.html"
   },
   "action": {
     "default_popup": "popup.html",

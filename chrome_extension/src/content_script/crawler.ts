@@ -164,7 +164,7 @@ export function buildVisibleUnreadEntries(): Array<{
         // 提取 sessionInfo 用于获取 sessionId 作为 unreadKey（比 visitKey 更稳定）
         // 避免重复导入 extractSessionInfoFromConversationItem，直接从 fiber 层取 sessionId
         // 通过 buildVisibleConversationEntries 已经维护了 state.sessionIndex，
-        // 但这里只需要侧边栏标准元数据，故用 visitKey 兜底
+        // 但这里只需要标准元数据，故用 visitKey 兜底
         const sessionEntry = buildVisibleConversationEntries().find(
             e => e.itemEl === itemEl
         );

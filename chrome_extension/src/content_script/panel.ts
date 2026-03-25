@@ -130,7 +130,7 @@ function renderQuotedPreview(chat: ChatRecord, replyMessageId?: string | null): 
 // 脚本版本（与 content_script.js SCRIPT_VERSION 保持一致）
 // ---------------------------------------------------------------------------
 
-const SCRIPT_VERSION = '4.2';
+const SCRIPT_VERSION = '4.3';
 
 // ---------------------------------------------------------------------------
 // 巡逻开关

@@ -128,13 +128,8 @@ function init(): void {
         saveState();
     }
 
-    // Chrome Extension 面板模式：'embedded' = 内嵌浮窗（同 Tampermonkey），其他 = 使用 Chrome 侧边栏
-    if (
-        (localStorage.getItem('_tamperfish_panel_mode') || 'sidepanel') === 'embedded'
-    ) {
-        createPanel();
-        renderPanel();
-    }
+    createPanel();
+    renderPanel();
 
     startHeartbeatLoop();
     startSenderLoop();

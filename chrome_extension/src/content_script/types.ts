@@ -389,9 +389,3 @@ export interface SettingsPatchPayload {
   autoReplyEnabled?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// 面板模式
-// ---------------------------------------------------------------------------
-
-/** 监控面板的显示模式 */
-export type PanelMode = 'sidepanel' | 'embedded';
