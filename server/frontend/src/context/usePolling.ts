@@ -7,7 +7,7 @@ import { getSessionMessages } from '../services/sessionsApi';
 import { getOutgoingMessages } from '../services/outgoingApi';
 import { getOrders } from '../services/ordersApi';
 import { getOrdersRuntime } from '../services/ordersApi';
-import { getClients } from '../services/clientsApi';
+import { getAllClients } from '../services/clientsApi';
 import type { ChatSnapshot } from '../types/api';
 
 export function usePolling(intervalMs = 3000) {
@@ -35,7 +35,7 @@ export function usePolling(intervalMs = 3000) {
       try {
         // 0. Fetch client list
         try {
-          const clients = await getClients();
+          const clients = await getAllClients();
           if (running) dispatch({ type: 'SET_CLIENTS', clients });
         } catch {
           // Client list failure is non-critical

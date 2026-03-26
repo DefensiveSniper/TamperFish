@@ -13,6 +13,7 @@ export interface Session {
   updated_at: number;
   // Computed by db.listSessions():
   message_count: number;
+  unread_count: number;
   last_message: string | null;
   last_is_me: number | null; // 0 or 1
   last_time: number | null;

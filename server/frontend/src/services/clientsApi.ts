@@ -5,6 +5,10 @@ export function getClients(): Promise<Client[]> {
   return apiFetch<Client[]>('/api/clients');
 }
 
+export function getAllClients(): Promise<Client[]> {
+  return apiFetch<Client[]>('/api/clients?all=1');
+}
+
 export function getClientRuntime(clientId: string): Promise<{
   settings: AppSettings;
   qianniu: QianniuRuntime;

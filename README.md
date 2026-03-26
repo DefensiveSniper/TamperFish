@@ -108,6 +108,47 @@ cp client/.env.example client/.env
 
 客户端常用变量见 [`client/.env.example`](client/.env.example)。
 
+#### 多客户端部署
+
+系统支持多个客户端实例连接同一个服务端。每个客户端需要在 `client/.env` 中配置唯一身份：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `CLIENT_ID` | `legacy-client-1` | 客户端唯一标识，每个实例必须不同 |
+| `CLIENT_SECRET` | 空 | 可选鉴权密钥 |
+| `ACCOUNT_ID` | `default` | 所属卖家账号标识，同一卖家的多个客户端填相同值 |
+| `CLIENT_NAME` | 空 | 前端显示名称 |
+
+**同一卖家多台机器**示例——共享 `ACCOUNT_ID`，会话数据互通：
+
+```bash
+# 机器 A: client/.env
+CLIENT_ID=shop-a-pc-1
+ACCOUNT_ID=shop-a
+CLIENT_NAME=店铺A-主力机
+
+# 机器 B: client/.env
+CLIENT_ID=shop-a-pc-2
+ACCOUNT_ID=shop-a
+CLIENT_NAME=店铺A-备用机
+```
+
+**多个卖家**示例——不同 `ACCOUNT_ID`，数据隔离，前端可切换：
+
+```bash
+# 卖家 A: client/.env
+CLIENT_ID=shop-a-client
+ACCOUNT_ID=shop-a
+CLIENT_NAME=店铺A
+
+# 卖家 B: client/.env
+CLIENT_ID=shop-b-client
+ACCOUNT_ID=shop-b
+CLIENT_NAME=店铺B
+```
+
+客户端启动时会自动向服务端注册（`POST /api/clients/register`），无需手动操作。服务端不需要为多客户端增加任何配置。
+
 ### 4. 构建前端和扩展
 
 ```bash

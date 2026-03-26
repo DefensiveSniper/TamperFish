@@ -95,8 +95,15 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, toast: { message: action.message, type: action.toastType } };
     case 'CLEAR_TOAST':
       return { ...state, toast: null };
-    case 'SET_CLIENTS':
-      return { ...state, clients: action.clients };
+    case 'SET_CLIENTS': {
+      const ids = action.clients.map((c) => c.client_id);
+      const needFix = ids.length > 0 && !ids.includes(state.activeClientId);
+      return {
+        ...state,
+        clients: action.clients,
+        ...(needFix ? { activeClientId: ids[0] } : {}),
+      };
+    }
     case 'SET_ACTIVE_CLIENT':
       return { ...state, activeClientId: action.clientId };
     case 'SET_ACTIVE_ACCOUNT':

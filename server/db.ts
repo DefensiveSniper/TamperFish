@@ -134,6 +134,7 @@ const SCHEMA_V2_DDL = `
     session_info_json TEXT NOT NULL DEFAULT '{}',
     buyer_user_id   TEXT,
     last_seen_client_id TEXT,
+    last_read_at    INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
     PRIMARY KEY (account_id, chat_key)
@@ -294,24 +295,29 @@ async function runMigration(db) {
       `INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, unixepoch())`,
       SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION
     );
-    return;
+  } else {
+    // Check current schema version
+    const versionRow = await db.get(
+      `SELECT value FROM app_settings WHERE key = ?`,
+      SCHEMA_VERSION_KEY
+    );
+    const currentVersion = versionRow?.value || '1';
+
+    if (currentVersion < CURRENT_SCHEMA_VERSION) {
+      // v1 → v2: full table rebuild migration
+      console.log('[migration] Upgrading schema from v1 to v2 (multi-account/multi-client)...');
+      await migrateV1ToV2(db);
+      console.log('[migration] Schema upgrade complete.');
+    }
   }
 
-  // Check current schema version
-  const versionRow = await db.get(
-    `SELECT value FROM app_settings WHERE key = ?`,
-    SCHEMA_VERSION_KEY
-  );
-  const currentVersion = versionRow?.value || '1';
-
-  if (currentVersion >= CURRENT_SCHEMA_VERSION) {
-    return; // Already up to date
+  // ── Safe column additions (idempotent, runs on every startup) ──
+  const safeAlters = [
+    `ALTER TABLE sessions ADD COLUMN last_read_at INTEGER NOT NULL DEFAULT 0`,
+  ];
+  for (const sql of safeAlters) {
+    try { await db.run(sql); } catch (_) { /* column already exists */ }
   }
-
-  // v1 → v2: full table rebuild migration
-  console.log('[migration] Upgrading schema from v1 to v2 (multi-account/multi-client)...');
-  await migrateV1ToV2(db);
-  console.log('[migration] Schema upgrade complete.');
 }
 
 async function migrateV1ToV2(db) {
@@ -1483,6 +1489,11 @@ async function listSessions(accountId) {
       s.session_id, s.session_info_json, s.buyer_user_id, s.last_seen_client_id,
       s.created_at, s.updated_at,
       COUNT(m.id) AS message_count,
+      (SELECT COUNT(*) FROM messages m2
+        WHERE m2.account_id = s.account_id AND m2.chat_key = s.chat_key
+          AND m2.is_me = 0
+          AND m2.ingested_at > s.last_read_at
+      ) AS unread_count,
       (SELECT content FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_message,
       (SELECT is_me   FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_is_me,
       (
@@ -1498,6 +1509,14 @@ async function listSessions(accountId) {
     GROUP BY s.account_id, s.chat_key
     ORDER BY COALESCE(last_time, s.updated_at) DESC
   `, accountId);
+}
+
+async function markSessionRead(accountId, chatKey) {
+  const db = await getDb();
+  await db.run(
+    `UPDATE sessions SET last_read_at = unixepoch() WHERE account_id = ? AND chat_key = ?`,
+    accountId, chatKey
+  );
 }
 
 async function getSession(accountId, chatKey) {
@@ -1967,6 +1986,7 @@ module.exports = {
   // Core data
   ingest,
   listSessions,
+  markSessionRead,
   getSession,
   getSessionBySessionId,
   getMessages,

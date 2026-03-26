@@ -54,7 +54,9 @@ const SidebarItem = React.memo(function SidebarItem({
       <div className="meta">
         <span className="price">{p.price || ''}</span>
         <span>{p.location || ''}</span>
-        <span className="badge">{session.message_count}</span>
+        {session.unread_count > 0 && (
+          <span className="badge">{session.unread_count}</span>
+        )}
       </div>
     </div>
   );

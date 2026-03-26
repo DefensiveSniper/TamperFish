@@ -1,19 +1,23 @@
 import { useAppState, useAppDispatch } from '../../context/AppContext';
-import { setActiveClientId } from '../../services/api';
+import { setActiveClientId, setActiveAccountId } from '../../services/api';
 
 export default function ClientSelector() {
   const { clients, activeClientId } = useAppState();
   const dispatch = useAppDispatch();
 
-  if (clients.length <= 1) {
-    // Single client — no need for selector
-    return null;
-  }
+  if (clients.length === 0) return null;
 
   const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const clientId = e.target.value;
+    const client = clients.find((c) => c.client_id === clientId);
+    if (!client) return;
+
     dispatch({ type: 'SET_ACTIVE_CLIENT', clientId });
     setActiveClientId(clientId);
+
+    // Switch account context along with client
+    dispatch({ type: 'SET_ACTIVE_ACCOUNT', accountId: client.account_id });
+    setActiveAccountId(client.account_id);
   };
 
   return (
@@ -35,6 +39,7 @@ export default function ClientSelector() {
       {clients.map((c) => (
         <option key={c.client_id} value={c.client_id}>
           {c.client_name || c.client_id}
+          {c.account_id !== clients[0]?.account_id ? ` (${c.account_id})` : ''}
           {c.isOnline ? ' ●' : ' ○'}
         </option>
       ))}

@@ -154,6 +154,18 @@ app.get('/api/sessions/:chatKey/messages', async (req, res) => {
   }
 });
 
+// ── POST /api/sessions/:chatKey/read (frontend) ─────────────────────────────
+
+app.post('/api/sessions/:chatKey/read', async (req, res) => {
+  try {
+    const accountId = resolveAccountId(req);
+    await db.markSessionRead(accountId, req.params.chatKey);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/settings (frontend) ────────────────────────────────────────────
 
 app.get('/api/settings', async (req, res) => {
@@ -440,7 +452,9 @@ app.patch('/api/outgoing-messages/:id', authenticateClient, async (req, res) => 
 
 app.get('/api/clients', async (req, res) => {
   try {
-    const accountId = resolveAccountId(req);
+    // If ?all=1, return clients across all accounts (for account switcher)
+    const allAccounts = req.query.all === '1';
+    const accountId = allAccounts ? null : resolveAccountId(req);
     const clients = await db.listClients(accountId);
     // Enrich with runtime info
     const enriched = await Promise.all(clients.map(async (client) => {
