@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TamperFish 控制台</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 100%;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: #0d1117;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    #offline {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: #c9d1d9;
+      text-align: center;
+      padding: 40px 20px;
+      gap: 16px;
+    }
+
+    #offline h3 {
+      font-size: 18px;
+      color: #f0f6fc;
+    }
+
+    #offline p {
+      font-size: 13px;
+      color: #8b949e;
+      line-height: 1.6;
+    }
+
+    #offline code {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 12px;
+      color: #79c0ff;
+    }
+
+    #retryBtn {
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 20px;
+      font-size: 14px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+
+    #retryBtn:hover { background: #2ea043; }
+
+    iframe {
+      flex: 1;
+      width: 100%;
+      border: none;
+    }
+  </style>
+</head>
+<body>
+  <iframe id="frame" src="http://localhost:3210" title="TamperFish 控制台"></iframe>
+
+  <div id="offline">
+    <h3>🔌 后端未启动</h3>
+    <p>请先运行后端服务：<br><code>cd server && npm start</code></p>
+    <button id="retryBtn">重试连接</button>
+  </div>
+
+  <script>
+    const frame = document.getElementById('frame');
+    const offline = document.getElementById('offline');
+    const retryBtn = document.getElementById('retryBtn');
+
+    // 检测 iframe 是否能加载（连接后端）
+    let checkTimer = null;
+
+    function showOffline() {
+      frame.style.display = 'none';
+      offline.style.display = 'flex';
+    }
+
+    function showOnline() {
+      frame.style.display = '';
+      offline.style.display = 'none';
+    }
+
+    async function checkBackend() {
+      try {
+        const resp = await fetch('http://localhost:3210/api/settings', { signal: AbortSignal.timeout(3000) });
+        if (resp.ok) {
+          showOnline();
+          frame.src = 'http://localhost:3210';
+        } else {
+          showOffline();
+        }
+      } catch {
+        showOffline();
+      }
+    }
+
+    // 首次加载检测
+    frame.addEventListener('load', () => {
+      // iframe 加载成功
+      showOnline();
+    });
+
+    frame.addEventListener('error', () => {
+      showOffline();
+    });
+
+    // 给 iframe 一定时间加载，超时则检查后端
+    checkTimer = setTimeout(async () => {
+      try {
+        await fetch('http://localhost:3210/api/settings', { signal: AbortSignal.timeout(3000) });
+        // 后端可达，iframe 应该正常
+      } catch {
+        showOffline();
+      }
+    }, 4000);
+
+    retryBtn.addEventListener('click', () => {
+      showOnline();
+      frame.src = 'http://localhost:3210';
+    });
+  </script>
+</body>
+</html>
