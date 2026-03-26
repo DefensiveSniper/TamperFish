@@ -8,6 +8,7 @@
 **/.env.local
 **/.env.*.local
 server/ai.local.js
+server/.auth_secret
 server/.chrome-proxy.local.json
 client/.chrome-proxy.local.json
 client/.browser-media-cache/

@@ -30,6 +30,10 @@ export async function apiFetch<T>(url: string, opts?: RequestInit): Promise<T> {
     headers,
   });
   if (!response.ok) {
+    if (response.status === 401) {
+      window.location.href = '/login';
+      throw new Error('unauthorized');
+    }
     const body = await response.text();
     let message: string;
     try {

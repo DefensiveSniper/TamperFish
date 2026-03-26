@@ -19,6 +19,7 @@ const {
   localizeMessages,
   localizeSessions,
 } = require('./media_cache.ts');
+const { securityHeaders, requireBrowserAuth, setupAuthRoutes } = require('./auth.ts');
 
 const app = express();
 const PORT = process.env.PORT || 3210;
@@ -62,6 +63,11 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// ── Security headers & browser auth ─────────────────────────────────────────
+app.use(securityHeaders);
+setupAuthRoutes(app);
+app.use(requireBrowserAuth);
 
 app.use(express.static(path.join(__dirname, 'public')));
 

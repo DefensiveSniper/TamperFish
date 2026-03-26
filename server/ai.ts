@@ -1,6 +1,7 @@
 // @ts-nocheck
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const { loadOptionalEnvFiles } = require('../load_env.ts');
 
@@ -21,6 +22,42 @@ loadOptionalEnvFiles([
  * 本地文件:
  *   ./ai.local.js    — 本机私有 API 密钥配置，优先级低于环境变量
  */
+
+const MEDIA_CACHE_DIR = path.join(__dirname, 'public', 'media-cache');
+
+const MIME_BY_EXT = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+};
+
+/**
+ * 将本地 media-cache URL 转为 base64 data URL。
+ * 如果 URL 不是本地缓存或文件不存在，原样返回（适用于公网可达的图片）。
+ * 文件读取失败时返回空字符串表示跳过。
+ */
+function resolveImageToDataUrl(imageUrl) {
+    try {
+        const parsed = new URL(imageUrl);
+        const mediaPrefix = '/media-cache/';
+        if (!parsed.pathname.startsWith(mediaPrefix)) return imageUrl;
+
+        const fileName = parsed.pathname.slice(mediaPrefix.length);
+        if (!fileName || fileName.includes('..') || fileName.includes('/')) return '';
+
+        const filePath = path.join(MEDIA_CACHE_DIR, fileName);
+        if (!filePath.startsWith(MEDIA_CACHE_DIR) || !fs.existsSync(filePath)) return '';
+
+        const ext = path.extname(fileName).toLowerCase();
+        const mime = MIME_BY_EXT[ext] || 'image/png';
+        const base64 = fs.readFileSync(filePath).toString('base64');
+        return `data:${mime};base64,${base64}`;
+    } catch (_) {
+        return '';
+    }
+}
 
 /**
  * 读取当前机器的本地 AI 配置。
@@ -171,13 +208,17 @@ async function generateReply(chatHistory, productInfo = {}) {
     for (const msg of recent) {
         const role = msg.role === 'buyer' ? 'user' : 'assistant';
         if ((msg.type || 'text') === 'image') {
-            // 图片消息：传递图片URL供多模态模型理解
-            messages.push({
-                role,
-                content: [
-                    { type: 'image_url', image_url: { url: msg.content } },
-                ],
-            });
+            // 图片消息：将本地缓存图片转为 base64 data URL，避免 LLM 提供商无法访问内网地址
+            const imageUrl = resolveImageToDataUrl(msg.content);
+            if (imageUrl) {
+                messages.push({
+                    role,
+                    content: [
+                        { type: 'image_url', image_url: { url: imageUrl } },
+                    ],
+                });
+            }
+            // 无法读取的图片直接跳过，不影响文本对话
         } else {
             messages.push({ role, content: msg.content });
         }
