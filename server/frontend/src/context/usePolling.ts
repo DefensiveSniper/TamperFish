@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { useAppState, useAppDispatch } from './AppContext';
+import { setActiveAccountId, setActiveClientId } from '../services/api';
 import { getSettings } from '../services/settingsApi';
 import { getSessions } from '../services/sessionsApi';
 import { getSessionMessages } from '../services/sessionsApi';
 import { getOutgoingMessages } from '../services/outgoingApi';
 import { getOrders } from '../services/ordersApi';
 import { getOrdersRuntime } from '../services/ordersApi';
+import { getClients } from '../services/clientsApi';
 import type { ChatSnapshot } from '../types/api';
 
 export function usePolling(intervalMs = 3000) {
@@ -13,6 +15,15 @@ export function usePolling(intervalMs = 3000) {
   const dispatch = useAppDispatch();
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // Keep api module in sync with active account/client selection
+  useEffect(() => {
+    setActiveAccountId(state.activeAccountId);
+  }, [state.activeAccountId]);
+
+  useEffect(() => {
+    setActiveClientId(state.activeClientId);
+  }, [state.activeClientId]);
 
   useEffect(() => {
     let running = true;
@@ -22,11 +33,19 @@ export function usePolling(intervalMs = 3000) {
       const current = stateRef.current;
 
       try {
-        // 1. Settings
+        // 0. Fetch client list
+        try {
+          const clients = await getClients();
+          if (running) dispatch({ type: 'SET_CLIENTS', clients });
+        } catch {
+          // Client list failure is non-critical
+        }
+
+        // 1. Settings (account + client scoped via headers)
         const settings = await getSettings();
         if (running) dispatch({ type: 'SET_SETTINGS', settings });
 
-        // 2. Sessions
+        // 2. Sessions (account scoped via headers)
         const sessions = await getSessions();
         if (running) dispatch({ type: 'SET_SESSIONS', sessions });
 
@@ -48,7 +67,7 @@ export function usePolling(intervalMs = 3000) {
           }
         }
 
-        // 4. Orders runtime (always, for header badge)
+        // 4. Orders runtime (client scoped via headers)
         try {
           const runtime = await getOrdersRuntime();
           if (running) dispatch({ type: 'SET_RUNTIME', runtime });

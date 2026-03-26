@@ -12,12 +12,8 @@ const OUTGOING_CLAIM_STALE_SECONDS = 45;
 let _db = null;
 let _dbInitPromise = null;
 
-/**
- * 为图片消息生成稳定的比较键，兼容历史远端 URL 与新的本地缓存 URL。
- * @param {string} content - 原始消息内容。
- * @param {string} type - 消息类型。
- * @returns {string} 可用于去重比较的归一化内容。
- */
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
 function normalizeMessageContentForMatching(content, type = 'text') {
   const normalizedContent = typeof content === 'string' ? content.trim() : '';
   if (type !== 'image' || !normalizedContent) {
@@ -36,12 +32,6 @@ function normalizeMessageContentForMatching(content, type = 'text') {
   return normalizedContent;
 }
 
-/**
- * 判断数据库消息与本次采集消息是否等价，兼容图片 URL 的本地缓存改写。
- * @param {{ content: string, is_me: number, type?: string }} dbMessage - 已入库消息。
- * @param {{ content: string, isMe: boolean, type?: string }} incomingMessage - 当前采集消息。
- * @returns {boolean} 是否应视为同一条消息。
- */
 function areMessagesEquivalent(dbMessage, incomingMessage) {
   const dbType = dbMessage?.type || 'text';
   const incomingType = incomingMessage?.type || 'text';
@@ -57,6 +47,8 @@ function areMessagesEquivalent(dbMessage, incomingMessage) {
     === normalizeMessageContentForMatching(incomingMessage?.content, incomingType);
 }
 
+// ── DB init ─────────────────────────────────────────────────────────────────
+
 async function getDb() {
   if (_db) return _db;
   if (_dbInitPromise) return _dbInitPromise;
@@ -66,8 +58,7 @@ async function getDb() {
     try {
       await openedDb.exec('PRAGMA journal_mode = WAL');
       await openedDb.exec('PRAGMA foreign_keys = ON');
-      await initSchema(openedDb);
-      await migrateSchema(openedDb);
+      await runMigration(openedDb);
       _db = openedDb;
       return openedDb;
     } catch (error) {
@@ -81,472 +72,696 @@ async function getDb() {
   return _dbInitPromise;
 }
 
-async function initSchema(db) {
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      chat_key      TEXT PRIMARY KEY,
-      customer_name TEXT NOT NULL,
-      product_id    TEXT,
-      product_json  TEXT NOT NULL DEFAULT '{}',
-      session_id    TEXT,
-      session_info_json TEXT NOT NULL DEFAULT '{}',
-      buyer_user_id TEXT,
-      created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at    INTEGER NOT NULL DEFAULT (unixepoch())
-    );
+// ── Schema v2: multi-account / multi-client ─────────────────────────────────
 
-    -- UNIQUE(chat_key, msg_hash) is the dedup key
-    -- msg_hash = sha256(seq|content|isMe)[:16]
-    CREATE TABLE IF NOT EXISTS messages (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_key    TEXT    NOT NULL REFERENCES sessions(chat_key),
-      msg_hash    TEXT    NOT NULL,
-      seq         INTEGER NOT NULL,
-      content     TEXT    NOT NULL,
-      is_me       INTEGER NOT NULL CHECK(is_me IN (0,1)),
-      external_message_id TEXT,
-      reply_to_message_id TEXT,
-      ingested_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      UNIQUE(chat_key, msg_hash)
-    );
-    CREATE INDEX IF NOT EXISTS idx_messages_chat_seq ON messages(chat_key, seq);
-
-    -- Internal event log written by ingest (new_session / new_messages events).
-    -- NOT for outgoing messages — use outgoing_messages table instead.
-    CREATE TABLE IF NOT EXISTS outbox (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_type   TEXT    NOT NULL,
-      chat_key     TEXT    NOT NULL,
-      payload      TEXT    NOT NULL,
-      created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
-      processed_at INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_outbox_pending
-      ON outbox(chat_key, created_at)
-      WHERE processed_at IS NULL;
-
-    -- Outgoing messages: messages queued to be sent by OpenClaw browser automation.
-    -- status: pending → sending → sent | failed
-    -- 新增 customer_name, product_id 用于精确路由（避免同一买家多商品会话发错）
-    CREATE TABLE IF NOT EXISTS outgoing_messages (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_key     TEXT    NOT NULL REFERENCES sessions(chat_key),
-      customer_name TEXT   NOT NULL,
-      product_id   TEXT,
-      session_id   TEXT,
-      content      TEXT    NOT NULL,
-      message_type TEXT    NOT NULL DEFAULT 'text',
-      media_data   TEXT,
-      media_name   TEXT,
-      reply_to_external_message_id TEXT,
-      reply_to_preview TEXT,
-      reply_to_type TEXT,
-      status       TEXT    NOT NULL DEFAULT 'pending'
-                         CHECK(status IN ('pending','sending','sent','failed')),
-      created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
-      sent_at      INTEGER,
-      claimed_at   INTEGER,
-      error        TEXT,
-      retries      INTEGER NOT NULL DEFAULT 0,
-      last_attempt_at INTEGER,
-      source       TEXT    NOT NULL DEFAULT 'ai'
-    );
-    CREATE INDEX IF NOT EXISTS idx_outgoing_pending
-      ON outgoing_messages(status, id)
-      WHERE status IN ('pending','sending');
-    -- 精确匹配索引
-    CREATE INDEX IF NOT EXISTS idx_outgoing_route
-      ON outgoing_messages(customer_name, product_id, status)
-      WHERE status IN ('pending','sending');
-    CREATE INDEX IF NOT EXISTS idx_outgoing_chat_status
-      ON outgoing_messages(chat_key, status, id);
-
-    -- 应用运行时设置，供 UI 与 worker 共享。
-    CREATE TABLE IF NOT EXISTS app_settings (
-      key        TEXT PRIMARY KEY,
-      value      TEXT NOT NULL,
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-
-    -- ── 千牛/发货预留表 (Reserved — not yet populated) ────────────────────────
-    -- orders: synced from 千牛; linked to a session via chat_key
-    CREATE TABLE IF NOT EXISTS orders (
-      id                INTEGER PRIMARY KEY AUTOINCREMENT,
-      order_id          TEXT UNIQUE,
-      chat_key          TEXT REFERENCES sessions(chat_key),
-      buyer_name        TEXT,
-      buyer_user_id     TEXT,
-      product_id        TEXT,
-      product_title     TEXT,
-      product_price     TEXT,
-      purchase_quantity INTEGER,
-      receiver_name     TEXT,
-      receiver_phone    TEXT,
-      receiver_address  TEXT,
-      order_status_text TEXT,
-      paid_at           INTEGER,
-      latest_ship_at    INTEGER,
-      last_seen_at      INTEGER,
-      status            TEXT NOT NULL DEFAULT 'pending',
-      raw_json          TEXT NOT NULL DEFAULT '{}',
-      created_at        INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at        INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-
-    -- shipments: one per order; tracking info from 千牛
-    CREATE TABLE IF NOT EXISTS shipments (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      order_id    TEXT REFERENCES orders(order_id),
-      tracking_no TEXT,
-      carrier     TEXT,
-      status      TEXT NOT NULL DEFAULT 'pending',
-      shipped_at  INTEGER,
-      raw_json    TEXT NOT NULL DEFAULT '{}',
-      created_at  INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-  `);
-}
-
-// ── Migration: add columns that may not exist yet ────────────────────────────
-
-async function migrateSchema(db) {
-  const additions = [
-    `ALTER TABLE sessions ADD COLUMN session_id TEXT`,
-    `ALTER TABLE sessions ADD COLUMN session_info_json TEXT NOT NULL DEFAULT '{}'`,
-    `ALTER TABLE sessions ADD COLUMN buyer_user_id TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN error TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN retries INTEGER NOT NULL DEFAULT 0`,
-    `ALTER TABLE outgoing_messages ADD COLUMN last_attempt_at INTEGER`,
-    `ALTER TABLE outgoing_messages ADD COLUMN customer_name TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN product_id TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN session_id TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN claimed_at INTEGER`,
-    `ALTER TABLE outgoing_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'`,
-    `ALTER TABLE outgoing_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'`,
-    `ALTER TABLE outgoing_messages ADD COLUMN media_data TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN media_name TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN reply_to_external_message_id TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN reply_to_preview TEXT`,
-    `ALTER TABLE outgoing_messages ADD COLUMN reply_to_type TEXT`,
-    `ALTER TABLE orders ADD COLUMN buyer_user_id TEXT`,
-    `ALTER TABLE orders ADD COLUMN product_title TEXT`,
-    `ALTER TABLE orders ADD COLUMN product_price TEXT`,
-    `ALTER TABLE orders ADD COLUMN purchase_quantity INTEGER`,
-    `ALTER TABLE orders ADD COLUMN receiver_name TEXT`,
-    `ALTER TABLE orders ADD COLUMN receiver_phone TEXT`,
-    `ALTER TABLE orders ADD COLUMN receiver_address TEXT`,
-    `ALTER TABLE orders ADD COLUMN order_status_text TEXT`,
-    `ALTER TABLE orders ADD COLUMN paid_at INTEGER`,
-    `ALTER TABLE orders ADD COLUMN latest_ship_at INTEGER`,
-    `ALTER TABLE orders ADD COLUMN last_seen_at INTEGER`,
-    `ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'`,
-    `ALTER TABLE messages ADD COLUMN external_message_id TEXT`,
-    `ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`,
-  ];
-  for (const sql of additions) {
-    try { await db.run(sql); } catch (_) { /* column already exists */ }
-  }
-
-  await db.run(
-    `UPDATE sessions
-     SET session_info_json = '{}'
-     WHERE session_info_json IS NULL OR TRIM(session_info_json) = ''`
+const SCHEMA_V2_DDL = `
+  -- Registered client instances (one per browser/machine combo)
+  CREATE TABLE IF NOT EXISTS clients (
+    client_id       TEXT PRIMARY KEY,
+    account_id      TEXT NOT NULL,
+    client_name     TEXT NOT NULL DEFAULT '',
+    client_secret_hash TEXT NOT NULL DEFAULT '',
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    last_seen_at    INTEGER,
+    status          TEXT NOT NULL DEFAULT 'active'
+                      CHECK(status IN ('active','disabled')),
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
   );
-  await backfillSessionBuyerUserIds(db);
-  await normalizeDuplicateSessionIds(db);
-  await db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_session_id_unique
-      ON sessions(session_id)
-      WHERE session_id IS NOT NULL AND session_id != '';
-    CREATE INDEX IF NOT EXISTS idx_sessions_buyer_product
-      ON sessions(buyer_user_id, product_id)
-      WHERE buyer_user_id IS NOT NULL
-        AND TRIM(buyer_user_id) != ''
-        AND product_id IS NOT NULL
-        AND TRIM(product_id) != '';
-    CREATE INDEX IF NOT EXISTS idx_outgoing_chat_status
-      ON outgoing_messages(chat_key, status, id);
-    CREATE INDEX IF NOT EXISTS idx_orders_recent
-      ON orders(last_seen_at DESC, updated_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_orders_chat_key
-      ON orders(chat_key, last_seen_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_orders_buyer_product
-      ON orders(buyer_user_id, product_id);
-  `);
-  await migrateOutgoingMessagesSchema(db);
-}
+  CREATE INDEX IF NOT EXISTS idx_clients_account ON clients(account_id);
 
-/**
- * 清理历史库里重复的 session_id，避免唯一索引在升级时直接失败。
- * 保留更像“真实会话”的那一条记录，其余重复行清空 session_id，等待后续采集重新补齐。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @returns {Promise<void>}
- */
-async function normalizeDuplicateSessionIds(db) {
-  const duplicateRows = await db.all(
-    `SELECT session_id
-     FROM sessions
-     WHERE session_id IS NOT NULL
-       AND TRIM(session_id) != ''
-     GROUP BY session_id
-     HAVING COUNT(*) > 1`
+  -- Per-account settings (auto_reply_enabled, etc.)
+  CREATE TABLE IF NOT EXISTS account_settings (
+    account_id      TEXT NOT NULL,
+    key             TEXT NOT NULL,
+    value           TEXT NOT NULL,
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (account_id, key)
   );
 
-  for (const duplicateRow of duplicateRows) {
-    const sessionId = duplicateRow.session_id;
-    const candidates = await db.all(
-      `SELECT
-         s.chat_key,
-         s.product_id,
-         s.updated_at,
-         s.created_at,
-         (
-           SELECT COUNT(*)
-           FROM messages m
-           WHERE m.chat_key = s.chat_key
-         ) AS message_count,
-         (
-           SELECT COUNT(*)
-           FROM outgoing_messages om
-           WHERE om.chat_key = s.chat_key
-             AND om.status IN ('pending', 'sending')
-         ) AS active_outgoing_count
-       FROM sessions s
-       WHERE s.session_id = ?
-       ORDER BY
-         CASE
-           WHEN s.product_id IS NOT NULL AND TRIM(s.product_id) != '' THEN 0
-           ELSE 1
-         END,
-         active_outgoing_count DESC,
-         message_count DESC,
-         s.updated_at DESC,
-         s.created_at DESC,
-         s.chat_key ASC`,
-      sessionId
-    );
+  -- Per-client runtime state (heartbeat, crawler, qianniu state)
+  CREATE TABLE IF NOT EXISTS client_runtime (
+    client_id       TEXT NOT NULL REFERENCES clients(client_id),
+    key             TEXT NOT NULL,
+    value           TEXT NOT NULL,
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (client_id, key)
+  );
 
-    const [, ...duplicatesToClear] = candidates;
-    if (!duplicatesToClear.length) {
-      continue;
-    }
+  -- Per-client commands (initial_crawl, orders_sync_now, orders_full_scan)
+  CREATE TABLE IF NOT EXISTS client_commands (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id       TEXT NOT NULL REFERENCES clients(client_id),
+    command_type    TEXT NOT NULL,
+    requested_nonce TEXT NOT NULL,
+    handled_nonce   TEXT,
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    handled_at      INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_client_commands_pending
+    ON client_commands(client_id, command_type)
+    WHERE handled_nonce IS NULL;
 
-    const placeholders = duplicatesToClear.map(() => '?').join(', ');
+  -- Chat sessions: scoped to account_id
+  CREATE TABLE IF NOT EXISTS sessions (
+    chat_key        TEXT NOT NULL,
+    account_id      TEXT NOT NULL,
+    customer_name   TEXT NOT NULL,
+    product_id      TEXT,
+    product_json    TEXT NOT NULL DEFAULT '{}',
+    session_id      TEXT,
+    session_info_json TEXT NOT NULL DEFAULT '{}',
+    buyer_user_id   TEXT,
+    last_seen_client_id TEXT,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (account_id, chat_key)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_session_id_unique
+    ON sessions(account_id, session_id)
+    WHERE session_id IS NOT NULL AND session_id != '';
+  CREATE INDEX IF NOT EXISTS idx_sessions_buyer_product
+    ON sessions(account_id, buyer_user_id, product_id)
+    WHERE buyer_user_id IS NOT NULL
+      AND TRIM(buyer_user_id) != ''
+      AND product_id IS NOT NULL
+      AND TRIM(product_id) != '';
+
+  -- Chat messages: scoped to account_id
+  CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      TEXT NOT NULL,
+    chat_key        TEXT NOT NULL,
+    msg_hash        TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+    content         TEXT NOT NULL,
+    is_me           INTEGER NOT NULL CHECK(is_me IN (0,1)),
+    type            TEXT NOT NULL DEFAULT 'text',
+    external_message_id TEXT,
+    reply_to_message_id TEXT,
+    ingested_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE(account_id, chat_key, msg_hash),
+    FOREIGN KEY (account_id, chat_key) REFERENCES sessions(account_id, chat_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_messages_chat_seq
+    ON messages(account_id, chat_key, seq);
+
+  -- Internal event log for auto-reply worker
+  CREATE TABLE IF NOT EXISTS outbox (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    chat_key        TEXT NOT NULL,
+    payload         TEXT NOT NULL,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    processed_at    INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_outbox_pending
+    ON outbox(account_id, chat_key, created_at)
+    WHERE processed_at IS NULL;
+
+  -- Outgoing messages queue
+  CREATE TABLE IF NOT EXISTS outgoing_messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      TEXT NOT NULL,
+    chat_key        TEXT NOT NULL,
+    customer_name   TEXT NOT NULL,
+    product_id      TEXT,
+    session_id      TEXT,
+    content         TEXT NOT NULL,
+    message_type    TEXT NOT NULL DEFAULT 'text',
+    media_data      TEXT,
+    media_name      TEXT,
+    reply_to_external_message_id TEXT,
+    reply_to_preview TEXT,
+    reply_to_type   TEXT,
+    target_client_id TEXT,
+    claimed_by_client_id TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(status IN ('pending','sending','sent','failed')),
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    sent_at         INTEGER,
+    claimed_at      INTEGER,
+    error           TEXT,
+    retries         INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at INTEGER,
+    source          TEXT NOT NULL DEFAULT 'ai',
+    FOREIGN KEY (account_id, chat_key) REFERENCES sessions(account_id, chat_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_outgoing_pending
+    ON outgoing_messages(status, id)
+    WHERE status IN ('pending','sending');
+  CREATE INDEX IF NOT EXISTS idx_outgoing_route
+    ON outgoing_messages(account_id, customer_name, product_id, status)
+    WHERE status IN ('pending','sending');
+  CREATE INDEX IF NOT EXISTS idx_outgoing_chat_status
+    ON outgoing_messages(account_id, chat_key, status, id);
+  CREATE INDEX IF NOT EXISTS idx_outgoing_target_client
+    ON outgoing_messages(target_client_id, status, id)
+    WHERE status IN ('pending','sending');
+
+  -- Orders: scoped to account_id
+  CREATE TABLE IF NOT EXISTS orders (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      TEXT NOT NULL,
+    order_id        TEXT NOT NULL,
+    chat_key        TEXT,
+    buyer_name      TEXT,
+    buyer_user_id   TEXT,
+    product_id      TEXT,
+    product_title   TEXT,
+    product_price   TEXT,
+    purchase_quantity INTEGER,
+    receiver_name   TEXT,
+    receiver_phone  TEXT,
+    receiver_address TEXT,
+    order_status_text TEXT,
+    paid_at         INTEGER,
+    latest_ship_at  INTEGER,
+    last_seen_at    INTEGER,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    raw_json        TEXT NOT NULL DEFAULT '{}',
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE(account_id, order_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_orders_recent
+    ON orders(account_id, last_seen_at DESC, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_orders_chat_key
+    ON orders(account_id, chat_key, last_seen_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_orders_buyer_product
+    ON orders(account_id, buyer_user_id, product_id);
+
+  -- Shipments (unchanged, just add account_id constraint)
+  CREATE TABLE IF NOT EXISTS shipments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      TEXT NOT NULL,
+    order_id        TEXT NOT NULL,
+    tracking_no     TEXT,
+    carrier         TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    shipped_at      INTEGER,
+    raw_json        TEXT NOT NULL DEFAULT '{}',
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  -- Legacy app_settings table kept for schema version tracking
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key             TEXT PRIMARY KEY,
+    value           TEXT NOT NULL,
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+`;
+
+// ── Migration ────────────────────────────────────────────────────────────────
+
+const SCHEMA_VERSION_KEY = 'schema_version';
+const CURRENT_SCHEMA_VERSION = '2';
+const DEFAULT_ACCOUNT_ID = 'default';
+const LEGACY_CLIENT_ID = 'legacy-client-1';
+
+async function runMigration(db) {
+  // Check if app_settings exists (old schema)
+  const hasAppSettings = await db.get(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'`
+  );
+
+  if (!hasAppSettings) {
+    // Fresh install — create v2 schema directly
+    await db.exec(SCHEMA_V2_DDL);
     await db.run(
-      `UPDATE sessions
-       SET session_id = NULL,
-           session_info_json = '{}',
-           updated_at = unixepoch()
-       WHERE chat_key IN (${placeholders})`,
-      ...duplicatesToClear.map(row => row.chat_key)
+      `INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, unixepoch())`,
+      SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION
     );
-  }
-}
-
-/**
- * 将旧版 outgoing_messages 表迁移到支持 sending 状态的新结构。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @returns {Promise<void>}
- */
-async function migrateOutgoingMessagesSchema(db) {
-  const table = await db.get(
-    `SELECT sql
-     FROM sqlite_master
-     WHERE type = 'table' AND name = 'outgoing_messages'`
-  );
-
-  if (!table?.sql || table.sql.includes(`'sending'`)) {
     return;
   }
 
-  await db.exec('SAVEPOINT outgoing_messages_schema_migration');
+  // Check current schema version
+  const versionRow = await db.get(
+    `SELECT value FROM app_settings WHERE key = ?`,
+    SCHEMA_VERSION_KEY
+  );
+  const currentVersion = versionRow?.value || '1';
+
+  if (currentVersion >= CURRENT_SCHEMA_VERSION) {
+    return; // Already up to date
+  }
+
+  // v1 → v2: full table rebuild migration
+  console.log('[migration] Upgrading schema from v1 to v2 (multi-account/multi-client)...');
+  await migrateV1ToV2(db);
+  console.log('[migration] Schema upgrade complete.');
+}
+
+async function migrateV1ToV2(db) {
+  await db.exec('BEGIN');
   try {
-    await db.exec(`DROP TABLE IF EXISTS outgoing_messages_v2`);
+    // ── 1. Create new tables ──
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS clients (
+        client_id       TEXT PRIMARY KEY,
+        account_id      TEXT NOT NULL,
+        client_name     TEXT NOT NULL DEFAULT '',
+        client_secret_hash TEXT NOT NULL DEFAULT '',
+        capabilities_json TEXT NOT NULL DEFAULT '[]',
+        last_seen_at    INTEGER,
+        status          TEXT NOT NULL DEFAULT 'active'
+                          CHECK(status IN ('active','disabled')),
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+
+      CREATE TABLE IF NOT EXISTS account_settings (
+        account_id      TEXT NOT NULL,
+        key             TEXT NOT NULL,
+        value           TEXT NOT NULL,
+        updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY (account_id, key)
+      );
+
+      CREATE TABLE IF NOT EXISTS client_runtime (
+        client_id       TEXT NOT NULL,
+        key             TEXT NOT NULL,
+        value           TEXT NOT NULL,
+        updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY (client_id, key)
+      );
+
+      CREATE TABLE IF NOT EXISTS client_commands (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id       TEXT NOT NULL,
+        command_type    TEXT NOT NULL,
+        requested_nonce TEXT NOT NULL,
+        handled_nonce   TEXT,
+        payload_json    TEXT NOT NULL DEFAULT '{}',
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        handled_at      INTEGER
+      );
+    `);
+
+    // ── 2. Create default account + legacy client ──
+    await db.run(
+      `INSERT OR IGNORE INTO clients(client_id, account_id, client_name, capabilities_json, status)
+       VALUES(?, ?, 'Legacy Client', '["crawler","qianniu"]', 'active')`,
+      LEGACY_CLIENT_ID, DEFAULT_ACCOUNT_ID
+    );
+
+    // ── 3. Migrate app_settings → account_settings + client_runtime ──
+    const accountSettingKeys = ['auto_reply_enabled'];
+    const clientRuntimeKeys = [
+      'crawler_desired_enabled', 'crawler_reported_enabled',
+      'crawler_last_heartbeat_at', 'initial_crawl_session_count',
+      'qianniu_page_url', 'qianniu_visible_order_count',
+      'qianniu_scan_state', 'qianniu_last_heartbeat_at',
+      'qianniu_last_sync_at', 'qianniu_last_sync_stats',
+    ];
+    const clientCommandNonces = [
+      { type: 'initial_crawl', requestedKey: 'initial_crawl_requested_nonce', handledKey: 'initial_crawl_handled_nonce' },
+      { type: 'orders_sync_now', requestedKey: 'qianniu_sync_now_requested_nonce', handledKey: 'qianniu_sync_now_handled_nonce' },
+      { type: 'orders_full_scan', requestedKey: 'qianniu_full_scan_requested_nonce', handledKey: 'qianniu_full_scan_handled_nonce' },
+    ];
+
+    for (const key of accountSettingKeys) {
+      const row = await db.get(`SELECT value FROM app_settings WHERE key = ?`, key);
+      if (row) {
+        await db.run(
+          `INSERT OR REPLACE INTO account_settings(account_id, key, value, updated_at) VALUES(?, ?, ?, unixepoch())`,
+          DEFAULT_ACCOUNT_ID, key, row.value
+        );
+      }
+    }
+
+    for (const key of clientRuntimeKeys) {
+      const row = await db.get(`SELECT value FROM app_settings WHERE key = ?`, key);
+      if (row) {
+        await db.run(
+          `INSERT OR REPLACE INTO client_runtime(client_id, key, value, updated_at) VALUES(?, ?, ?, unixepoch())`,
+          LEGACY_CLIENT_ID, key, row.value
+        );
+      }
+    }
+
+    for (const { type, requestedKey, handledKey } of clientCommandNonces) {
+      const requested = await db.get(`SELECT value FROM app_settings WHERE key = ?`, requestedKey);
+      const handled = await db.get(`SELECT value FROM app_settings WHERE key = ?`, handledKey);
+      if (requested?.value) {
+        await db.run(
+          `INSERT INTO client_commands(client_id, command_type, requested_nonce, handled_nonce, created_at, handled_at)
+           VALUES(?, ?, ?, ?, unixepoch(), CASE WHEN ? IS NOT NULL AND ? != '' THEN unixepoch() ELSE NULL END)`,
+          LEGACY_CLIENT_ID, type, requested.value,
+          (handled?.value || null),
+          handled?.value, handled?.value
+        );
+      }
+    }
+
+    // ── 4. Rebuild sessions table ──
+    // First, add migrations for old schema columns that might be missing
+    const sessionAdditions = [
+      `ALTER TABLE sessions ADD COLUMN session_id TEXT`,
+      `ALTER TABLE sessions ADD COLUMN session_info_json TEXT NOT NULL DEFAULT '{}'`,
+      `ALTER TABLE sessions ADD COLUMN buyer_user_id TEXT`,
+    ];
+    for (const sql of sessionAdditions) {
+      try { await db.run(sql); } catch (_) { /* column exists */ }
+    }
+
+    await db.exec(`
+      CREATE TABLE sessions_v2 (
+        chat_key        TEXT NOT NULL,
+        account_id      TEXT NOT NULL,
+        customer_name   TEXT NOT NULL,
+        product_id      TEXT,
+        product_json    TEXT NOT NULL DEFAULT '{}',
+        session_id      TEXT,
+        session_info_json TEXT NOT NULL DEFAULT '{}',
+        buyer_user_id   TEXT,
+        last_seen_client_id TEXT,
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY (account_id, chat_key)
+      );
+
+      INSERT INTO sessions_v2(
+        chat_key, account_id, customer_name, product_id, product_json,
+        session_id, session_info_json, buyer_user_id, last_seen_client_id,
+        created_at, updated_at
+      )
+      SELECT
+        chat_key, '${DEFAULT_ACCOUNT_ID}', customer_name, product_id,
+        COALESCE(product_json, '{}'),
+        session_id,
+        COALESCE(session_info_json, '{}'),
+        buyer_user_id,
+        '${LEGACY_CLIENT_ID}',
+        created_at, updated_at
+      FROM sessions;
+    `);
+
+    // ── 5. Rebuild messages table ──
+    const messageAdditions = [
+      `ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'`,
+      `ALTER TABLE messages ADD COLUMN external_message_id TEXT`,
+      `ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`,
+    ];
+    for (const sql of messageAdditions) {
+      try { await db.run(sql); } catch (_) { /* column exists */ }
+    }
+
+    await db.exec(`
+      CREATE TABLE messages_v2 (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id      TEXT NOT NULL,
+        chat_key        TEXT NOT NULL,
+        msg_hash        TEXT NOT NULL,
+        seq             INTEGER NOT NULL,
+        content         TEXT NOT NULL,
+        is_me           INTEGER NOT NULL CHECK(is_me IN (0,1)),
+        type            TEXT NOT NULL DEFAULT 'text',
+        external_message_id TEXT,
+        reply_to_message_id TEXT,
+        ingested_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+        UNIQUE(account_id, chat_key, msg_hash)
+      );
+
+      INSERT INTO messages_v2(
+        id, account_id, chat_key, msg_hash, seq, content, is_me, type,
+        external_message_id, reply_to_message_id, ingested_at
+      )
+      SELECT
+        id, '${DEFAULT_ACCOUNT_ID}', chat_key, msg_hash, seq, content, is_me,
+        COALESCE(type, 'text'),
+        external_message_id, reply_to_message_id, ingested_at
+      FROM messages;
+    `);
+
+    // ── 6. Rebuild outbox table ──
+    await db.exec(`
+      CREATE TABLE outbox_v2 (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id      TEXT NOT NULL,
+        event_type      TEXT NOT NULL,
+        chat_key        TEXT NOT NULL,
+        payload         TEXT NOT NULL,
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        processed_at    INTEGER
+      );
+
+      INSERT INTO outbox_v2(id, account_id, event_type, chat_key, payload, created_at, processed_at)
+      SELECT id, '${DEFAULT_ACCOUNT_ID}', event_type, chat_key, payload, created_at, processed_at
+      FROM outbox;
+    `);
+
+    // ── 7. Rebuild outgoing_messages table ──
+    // Ensure old columns exist before migration
+    const outgoingAdditions = [
+      `ALTER TABLE outgoing_messages ADD COLUMN error TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN retries INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE outgoing_messages ADD COLUMN last_attempt_at INTEGER`,
+      `ALTER TABLE outgoing_messages ADD COLUMN customer_name TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN product_id TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN session_id TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN claimed_at INTEGER`,
+      `ALTER TABLE outgoing_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'`,
+      `ALTER TABLE outgoing_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'`,
+      `ALTER TABLE outgoing_messages ADD COLUMN media_data TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN media_name TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN reply_to_external_message_id TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN reply_to_preview TEXT`,
+      `ALTER TABLE outgoing_messages ADD COLUMN reply_to_type TEXT`,
+    ];
+    for (const sql of outgoingAdditions) {
+      try { await db.run(sql); } catch (_) { /* column exists */ }
+    }
+
     await db.exec(`
       CREATE TABLE outgoing_messages_v2 (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_key        TEXT    NOT NULL REFERENCES sessions(chat_key),
-        customer_name   TEXT    NOT NULL,
+        account_id      TEXT NOT NULL,
+        chat_key        TEXT NOT NULL,
+        customer_name   TEXT NOT NULL,
         product_id      TEXT,
         session_id      TEXT,
-        content         TEXT    NOT NULL,
-        message_type    TEXT    NOT NULL DEFAULT 'text',
+        content         TEXT NOT NULL,
+        message_type    TEXT NOT NULL DEFAULT 'text',
         media_data      TEXT,
         media_name      TEXT,
         reply_to_external_message_id TEXT,
         reply_to_preview TEXT,
         reply_to_type   TEXT,
-        status          TEXT    NOT NULL DEFAULT 'pending'
-                            CHECK(status IN ('pending','sending','sent','failed')),
+        target_client_id TEXT,
+        claimed_by_client_id TEXT,
+        status          TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','sending','sent','failed')),
         created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
         sent_at         INTEGER,
         claimed_at      INTEGER,
         error           TEXT,
         retries         INTEGER NOT NULL DEFAULT 0,
         last_attempt_at INTEGER,
-        source          TEXT    NOT NULL DEFAULT 'ai'
-      )
-    `);
-    await db.exec(`
+        source          TEXT NOT NULL DEFAULT 'ai'
+      );
+
       INSERT INTO outgoing_messages_v2(
-        id,
-        chat_key,
-        customer_name,
-        product_id,
-        session_id,
-        content,
-        message_type,
-        media_data,
-        media_name,
-        reply_to_external_message_id,
-        reply_to_preview,
-        reply_to_type,
-        status,
-        created_at,
-        sent_at,
-        claimed_at,
-        error,
-        retries,
-        last_attempt_at,
-        source
+        id, account_id, chat_key, customer_name, product_id, session_id,
+        content, message_type, media_data, media_name,
+        reply_to_external_message_id, reply_to_preview, reply_to_type,
+        target_client_id, claimed_by_client_id,
+        status, created_at, sent_at, claimed_at, error, retries, last_attempt_at, source
       )
       SELECT
-        legacy.id,
-        legacy.chat_key,
-        COALESCE(legacy.customer_name, s.customer_name, legacy.chat_key),
-        COALESCE(legacy.product_id, s.product_id),
-        s.session_id,
-        legacy.content,
-        'text',
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
+        om.id,
+        '${DEFAULT_ACCOUNT_ID}',
+        om.chat_key,
+        COALESCE(om.customer_name, s.customer_name, om.chat_key),
+        COALESCE(om.product_id, s.product_id),
+        COALESCE(om.session_id, s.session_id),
+        om.content,
+        COALESCE(om.message_type, 'text'),
+        om.media_data,
+        om.media_name,
+        om.reply_to_external_message_id,
+        om.reply_to_preview,
+        om.reply_to_type,
+        '${LEGACY_CLIENT_ID}',
+        CASE WHEN om.status = 'sending' THEN '${LEGACY_CLIENT_ID}' ELSE NULL END,
         CASE
-          WHEN legacy.status IN ('pending','sent','failed') THEN legacy.status
+          WHEN om.status IN ('pending','sending','sent','failed') THEN om.status
           ELSE 'pending'
         END,
-        legacy.created_at,
-        legacy.sent_at,
-        NULL,
-        legacy.error,
-        COALESCE(legacy.retries, 0),
-        legacy.last_attempt_at,
-        COALESCE(legacy.source, 'ai')
-      FROM outgoing_messages legacy
-      LEFT JOIN sessions s ON s.chat_key = legacy.chat_key
-    `);
-    await db.exec(`DROP TABLE outgoing_messages`);
-    await db.exec(`ALTER TABLE outgoing_messages_v2 RENAME TO outgoing_messages`);
-    await db.exec(`
-      CREATE INDEX idx_outgoing_pending
-        ON outgoing_messages(status, id)
-        WHERE status IN ('pending','sending')
-    `);
-    await db.exec(`
-      CREATE INDEX idx_outgoing_route
-        ON outgoing_messages(customer_name, product_id, status)
-        WHERE status IN ('pending','sending')
-    `);
-    await db.exec(`
-      CREATE INDEX idx_outgoing_chat_status
-        ON outgoing_messages(chat_key, status, id)
+        om.created_at,
+        om.sent_at,
+        om.claimed_at,
+        om.error,
+        COALESCE(om.retries, 0),
+        om.last_attempt_at,
+        COALESCE(om.source, 'ai')
+      FROM outgoing_messages om
+      LEFT JOIN sessions s ON s.chat_key = om.chat_key;
     `);
 
-    await db.exec('RELEASE SAVEPOINT outgoing_messages_schema_migration');
+    // ── 8. Rebuild orders table ──
+    const orderAdditions = [
+      `ALTER TABLE orders ADD COLUMN buyer_user_id TEXT`,
+      `ALTER TABLE orders ADD COLUMN product_title TEXT`,
+      `ALTER TABLE orders ADD COLUMN product_price TEXT`,
+      `ALTER TABLE orders ADD COLUMN purchase_quantity INTEGER`,
+      `ALTER TABLE orders ADD COLUMN receiver_name TEXT`,
+      `ALTER TABLE orders ADD COLUMN receiver_phone TEXT`,
+      `ALTER TABLE orders ADD COLUMN receiver_address TEXT`,
+      `ALTER TABLE orders ADD COLUMN order_status_text TEXT`,
+      `ALTER TABLE orders ADD COLUMN paid_at INTEGER`,
+      `ALTER TABLE orders ADD COLUMN latest_ship_at INTEGER`,
+      `ALTER TABLE orders ADD COLUMN last_seen_at INTEGER`,
+    ];
+    for (const sql of orderAdditions) {
+      try { await db.run(sql); } catch (_) { /* column exists */ }
+    }
+
+    await db.exec(`
+      CREATE TABLE orders_v2 (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id      TEXT NOT NULL,
+        order_id        TEXT NOT NULL,
+        chat_key        TEXT,
+        buyer_name      TEXT,
+        buyer_user_id   TEXT,
+        product_id      TEXT,
+        product_title   TEXT,
+        product_price   TEXT,
+        purchase_quantity INTEGER,
+        receiver_name   TEXT,
+        receiver_phone  TEXT,
+        receiver_address TEXT,
+        order_status_text TEXT,
+        paid_at         INTEGER,
+        latest_ship_at  INTEGER,
+        last_seen_at    INTEGER,
+        status          TEXT NOT NULL DEFAULT 'pending',
+        raw_json        TEXT NOT NULL DEFAULT '{}',
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        UNIQUE(account_id, order_id)
+      );
+
+      INSERT INTO orders_v2(
+        id, account_id, order_id, chat_key,
+        buyer_name, buyer_user_id, product_id, product_title, product_price,
+        purchase_quantity, receiver_name, receiver_phone, receiver_address,
+        order_status_text, paid_at, latest_ship_at, last_seen_at,
+        status, raw_json, created_at, updated_at
+      )
+      SELECT
+        id, '${DEFAULT_ACCOUNT_ID}', order_id, chat_key,
+        buyer_name, buyer_user_id, product_id, product_title, product_price,
+        purchase_quantity, receiver_name, receiver_phone, receiver_address,
+        order_status_text, paid_at, latest_ship_at, last_seen_at,
+        status, COALESCE(raw_json, '{}'), created_at, updated_at
+      FROM orders;
+    `);
+
+    // ── 9. Rebuild shipments table ──
+    await db.exec(`
+      CREATE TABLE shipments_v2 (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id      TEXT NOT NULL,
+        order_id        TEXT NOT NULL,
+        tracking_no     TEXT,
+        carrier         TEXT,
+        status          TEXT NOT NULL DEFAULT 'pending',
+        shipped_at      INTEGER,
+        raw_json        TEXT NOT NULL DEFAULT '{}',
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+
+      INSERT INTO shipments_v2(id, account_id, order_id, tracking_no, carrier, status, shipped_at, raw_json, created_at)
+      SELECT id, '${DEFAULT_ACCOUNT_ID}', order_id, tracking_no, carrier, status, shipped_at, COALESCE(raw_json, '{}'), created_at
+      FROM shipments;
+    `);
+
+    // ── 10. Swap tables ──
+    await db.exec(`
+      DROP TABLE IF EXISTS messages;
+      DROP TABLE IF EXISTS outgoing_messages;
+      DROP TABLE IF EXISTS outbox;
+      DROP TABLE IF EXISTS orders;
+      DROP TABLE IF EXISTS shipments;
+      DROP TABLE IF EXISTS sessions;
+
+      ALTER TABLE sessions_v2 RENAME TO sessions;
+      ALTER TABLE messages_v2 RENAME TO messages;
+      ALTER TABLE outbox_v2 RENAME TO outbox;
+      ALTER TABLE outgoing_messages_v2 RENAME TO outgoing_messages;
+      ALTER TABLE orders_v2 RENAME TO orders;
+      ALTER TABLE shipments_v2 RENAME TO shipments;
+    `);
+
+    // ── 11. Recreate indexes on renamed tables ──
+    await db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_session_id_unique
+        ON sessions(account_id, session_id)
+        WHERE session_id IS NOT NULL AND session_id != '';
+      CREATE INDEX IF NOT EXISTS idx_sessions_buyer_product
+        ON sessions(account_id, buyer_user_id, product_id)
+        WHERE buyer_user_id IS NOT NULL
+          AND TRIM(buyer_user_id) != ''
+          AND product_id IS NOT NULL
+          AND TRIM(product_id) != '';
+      CREATE INDEX IF NOT EXISTS idx_clients_account ON clients(account_id);
+
+      CREATE INDEX IF NOT EXISTS idx_messages_chat_seq
+        ON messages(account_id, chat_key, seq);
+
+      CREATE INDEX IF NOT EXISTS idx_outbox_pending
+        ON outbox(account_id, chat_key, created_at)
+        WHERE processed_at IS NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_outgoing_pending
+        ON outgoing_messages(status, id)
+        WHERE status IN ('pending','sending');
+      CREATE INDEX IF NOT EXISTS idx_outgoing_route
+        ON outgoing_messages(account_id, customer_name, product_id, status)
+        WHERE status IN ('pending','sending');
+      CREATE INDEX IF NOT EXISTS idx_outgoing_chat_status
+        ON outgoing_messages(account_id, chat_key, status, id);
+      CREATE INDEX IF NOT EXISTS idx_outgoing_target_client
+        ON outgoing_messages(target_client_id, status, id)
+        WHERE status IN ('pending','sending');
+
+      CREATE INDEX IF NOT EXISTS idx_orders_recent
+        ON orders(account_id, last_seen_at DESC, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_orders_chat_key
+        ON orders(account_id, chat_key, last_seen_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_orders_buyer_product
+        ON orders(account_id, buyer_user_id, product_id);
+
+      CREATE INDEX IF NOT EXISTS idx_client_commands_pending
+        ON client_commands(client_id, command_type)
+        WHERE handled_nonce IS NULL;
+    `);
+
+    // ── 12. Update schema version ──
+    await db.run(
+      `INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, unixepoch())
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()`,
+      SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION
+    );
+
+    await db.exec('COMMIT');
   } catch (error) {
-    await db.exec('ROLLBACK TO SAVEPOINT outgoing_messages_schema_migration');
-    await db.exec('RELEASE SAVEPOINT outgoing_messages_schema_migration');
+    await db.exec('ROLLBACK');
     throw error;
   }
 }
 
-const OUTGOING_LIST_COLUMNS = [
-  'id',
-  'chat_key',
-  'customer_name',
-  'product_id',
-  'session_id',
-  'content',
-  'message_type',
-  'media_name',
-  'reply_to_external_message_id',
-  'reply_to_preview',
-  'reply_to_type',
-  'status',
-  'created_at',
-  'sent_at',
-  'claimed_at',
-  'error',
-  'retries',
-  'source',
-].join(', ');
+// ── Utility helpers ──────────────────────────────────────────────────────────
 
-/**
- * 从会话载荷中提取买家 userId，优先读取显式字段，再回退到商品与会话元数据。
- * @param {{
- *   buyerUserId?: string | null,
- *   product?: { userId?: string | null },
- *   sessionInfo?: { userInfo?: { userId?: string | null } } | null
- * }} session - 当前会话载荷。
- * @returns {string | null} 归一化后的买家 userId。
- */
-function extractBuyerUserIdFromSessionPayload(session = {}) {
-  const candidates = [
-    session.buyerUserId,
-    session.product?.userId,
-    session.sessionInfo?.userInfo?.userId,
-  ];
-
-  for (const candidate of candidates) {
-    const normalized = candidate == null ? '' : String(candidate).trim();
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  return null;
+function normalizeOptionalText(value) {
+  if (value == null) return null;
+  const normalized = String(value).trim();
+  return normalized ? normalized : null;
 }
-
-/**
- * 尽力从历史 session 记录里回填 buyer_user_id，兼容旧版本只把 userId 塞进 JSON 的情况。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @returns {Promise<void>}
- */
-async function backfillSessionBuyerUserIds(db) {
-  const rows = await db.all(
-    `SELECT chat_key, product_json, session_info_json
-     FROM sessions
-     WHERE buyer_user_id IS NULL OR TRIM(buyer_user_id) = ''`
-  );
-
-  for (const row of rows) {
-    let product = {};
-    let sessionInfo = {};
-    try { product = JSON.parse(row.product_json || '{}'); } catch (_) { /* ignore */ }
-    try { sessionInfo = JSON.parse(row.session_info_json || '{}'); } catch (_) { /* ignore */ }
-
-    const buyerUserId = extractBuyerUserIdFromSessionPayload({
-      product,
-      sessionInfo,
-    });
-    if (!buyerUserId) {
-      continue;
-    }
-
-    await db.run(
-      `UPDATE sessions
-       SET buyer_user_id = ?,
-           updated_at = unixepoch()
-       WHERE chat_key = ?`,
-      buyerUserId,
-      row.chat_key
-    );
-  }
-}
-
-// ── Hash helper ──────────────────────────────────────────────────────────────
 
 function msgHash(seq, content, isMe) {
   return crypto
@@ -556,12 +771,6 @@ function msgHash(seq, content, isMe) {
     .slice(0, 16);
 }
 
-/**
- * 判断数据库中的消息序列与传入快照是否逐条一致。
- * @param {{content: string, is_me: number}[]} dbMessages - 数据库中的消息序列。
- * @param {{content: string, isMe: boolean}[]} incomingMessages - 本轮采集到的消息序列。
- * @returns {boolean} 是否是同一会话快照。
- */
 function areMessageSnapshotsEquivalent(dbMessages = [], incomingMessages = []) {
   if (dbMessages.length !== incomingMessages.length) return false;
   for (let i = 0; i < dbMessages.length; i++) {
@@ -571,22 +780,368 @@ function areMessageSnapshotsEquivalent(dbMessages = [], incomingMessages = []) {
   return true;
 }
 
-/**
- * 当采集结果缺少商品 ID 时，尝试把它映射到库里已有的完整会话键。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @param {string} chatKey - 当前采集到的会话键。
- * @param {string} customerName - 当前买家名。
- * @param {string|null} productId - 当前商品 ID。
- * @param {{content: string, isMe: boolean}[]} messages - 当前消息快照。
- * @returns {Promise<string>} 应该落库的规范会话键。
- */
-async function resolveCanonicalSessionKey(db, chatKey, customerName, productId, messages = [], sessionId = null) {
+function extractBuyerUserIdFromSessionPayload(session = {}) {
+  const candidates = [
+    session.buyerUserId,
+    session.product?.userId,
+    session.sessionInfo?.userInfo?.userId,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = candidate == null ? '' : String(candidate).trim();
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
+function parseQianniuDateTimeToUnix(text) {
+  const normalized = normalizeOptionalText(text);
+  if (!normalized) return null;
+
+  const match = normalized.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+
+  const [, year, month, day, hour, minute, second = '00'] = match;
+  const parsed = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  return Math.floor(parsed.getTime() / 1000);
+}
+
+function normalizeQianniuPriceText(text) {
+  const normalized = normalizeOptionalText(text);
+  if (!normalized) return null;
+  const match = normalized.match(/([0-9]+(?:\.[0-9]{1,2})?)/);
+  if (!match) return null;
+  return `￥${match[1]}`;
+}
+
+function parseQianniuQuantity(value) {
+  const normalized = normalizeOptionalText(value);
+  if (!normalized) return null;
+  const match = normalized.match(/(\d+)/);
+  if (!match) return null;
+  const quantity = Number(match[1]);
+  if (!Number.isInteger(quantity) || quantity <= 0) return null;
+  return quantity;
+}
+
+function stringifyJsonSafely(payload) {
+  try { return JSON.stringify(payload || {}); } catch (_) { return '{}'; }
+}
+
+// ── Client management ────────────────────────────────────────────────────────
+
+async function registerClient(clientId, accountId, clientName = '', secretHash = '', capabilities = []) {
+  const db = await getDb();
+  await db.run(
+    `INSERT INTO clients(client_id, account_id, client_name, client_secret_hash, capabilities_json, last_seen_at, status)
+     VALUES(?, ?, ?, ?, ?, unixepoch(), 'active')
+     ON CONFLICT(client_id) DO UPDATE SET
+       account_id = excluded.account_id,
+       client_name = excluded.client_name,
+       client_secret_hash = CASE
+         WHEN excluded.client_secret_hash != '' THEN excluded.client_secret_hash
+         ELSE clients.client_secret_hash
+       END,
+       capabilities_json = excluded.capabilities_json,
+       last_seen_at = unixepoch(),
+       status = 'active',
+       updated_at = unixepoch()`,
+    clientId, accountId, clientName, secretHash, JSON.stringify(capabilities)
+  );
+}
+
+async function getClient(clientId) {
+  const db = await getDb();
+  return db.get(`SELECT * FROM clients WHERE client_id = ?`, clientId);
+}
+
+async function listClients(accountId = null) {
+  const db = await getDb();
+  if (accountId) {
+    return db.all(`SELECT * FROM clients WHERE account_id = ? ORDER BY created_at ASC`, accountId);
+  }
+  return db.all(`SELECT * FROM clients ORDER BY account_id, created_at ASC`);
+}
+
+async function updateClientLastSeen(clientId) {
+  const db = await getDb();
+  await db.run(
+    `UPDATE clients SET last_seen_at = unixepoch(), updated_at = unixepoch() WHERE client_id = ?`,
+    clientId
+  );
+}
+
+// ── Account settings ─────────────────────────────────────────────────────────
+
+async function getAccountSetting(accountId, key, fallbackValue = null) {
+  const db = await getDb();
+  const row = await db.get(
+    `SELECT value FROM account_settings WHERE account_id = ? AND key = ?`,
+    accountId, key
+  );
+  return row ? row.value : fallbackValue;
+}
+
+async function setAccountSetting(accountId, key, value) {
+  const db = await getDb();
+  await db.run(
+    `INSERT INTO account_settings(account_id, key, value, updated_at)
+     VALUES(?, ?, ?, unixepoch())
+     ON CONFLICT(account_id, key) DO UPDATE SET
+       value = excluded.value,
+       updated_at = unixepoch()`,
+    accountId, key, value
+  );
+}
+
+async function isAutoReplyEnabled(accountId) {
+  const value = await getAccountSetting(accountId, 'auto_reply_enabled', '1');
+  return value === '1';
+}
+
+async function setAutoReplyEnabled(accountId, enabled) {
+  await setAccountSetting(accountId, 'auto_reply_enabled', enabled ? '1' : '0');
+}
+
+// ── Client runtime ───────────────────────────────────────────────────────────
+
+async function getClientRuntime(clientId, key, fallbackValue = null) {
+  const db = await getDb();
+  const row = await db.get(
+    `SELECT value FROM client_runtime WHERE client_id = ? AND key = ?`,
+    clientId, key
+  );
+  return row ? row.value : fallbackValue;
+}
+
+async function setClientRuntime(clientId, key, value) {
+  const db = await getDb();
+  await db.run(
+    `INSERT INTO client_runtime(client_id, key, value, updated_at)
+     VALUES(?, ?, ?, unixepoch())
+     ON CONFLICT(client_id, key) DO UPDATE SET
+       value = excluded.value,
+       updated_at = unixepoch()`,
+    clientId, key, value
+  );
+}
+
+async function isCrawlerDesiredEnabled(clientId) {
+  const value = await getClientRuntime(clientId, 'crawler_desired_enabled', '1');
+  return value === '1';
+}
+
+async function setCrawlerDesiredEnabled(clientId, enabled) {
+  await setClientRuntime(clientId, 'crawler_desired_enabled', enabled ? '1' : '0');
+}
+
+async function updateCrawlerHeartbeat(clientId, runtimeState) {
+  await setClientRuntime(clientId, 'crawler_reported_enabled', runtimeState.crawlerEnabled ? '1' : '0');
+  await setClientRuntime(clientId, 'crawler_last_heartbeat_at', String(Math.floor(Date.now() / 1000)));
+  await updateClientLastSeen(clientId);
+}
+
+async function getRuntimeSettings(accountId, clientId) {
+  const [
+    autoReplyEnabled,
+    crawlerDesiredEnabled,
+    crawlerReportedValue,
+    crawlerLastHeartbeatValue,
+    initialCrawlSessionCountValue,
+  ] = await Promise.all([
+    isAutoReplyEnabled(accountId),
+    isCrawlerDesiredEnabled(clientId),
+    getClientRuntime(clientId, 'crawler_reported_enabled', ''),
+    getClientRuntime(clientId, 'crawler_last_heartbeat_at', '0'),
+    getClientRuntime(clientId, 'initial_crawl_session_count', '30'),
+  ]);
+
+  // Get pending initial_crawl command for this client
+  const db = await getDb();
+  const pendingCrawl = await db.get(
+    `SELECT requested_nonce FROM client_commands
+     WHERE client_id = ? AND command_type = 'initial_crawl' AND handled_nonce IS NULL
+     ORDER BY id DESC LIMIT 1`,
+    clientId
+  );
+
+  return {
+    autoReplyEnabled,
+    crawlerDesiredEnabled,
+    crawlerReportedEnabled:
+      crawlerReportedValue === '' ? null : crawlerReportedValue === '1',
+    crawlerLastHeartbeatAt: Number(crawlerLastHeartbeatValue || 0),
+    initialCrawlSessionCount: Number(initialCrawlSessionCountValue) || 30,
+    initialCrawlNonce: pendingCrawl?.requested_nonce || null,
+  };
+}
+
+async function ensureRuntimeSettings(accountId, clientId, defaults = {}) {
+  const autoReplyValue = defaults.autoReplyEnabled ? '1' : '0';
+  const crawlerDesiredValue = defaults.crawlerDesiredEnabled === false ? '0' : '1';
+
+  // Account-level settings
+  const db = await getDb();
+  await db.run(
+    `INSERT INTO account_settings(account_id, key, value, updated_at)
+     VALUES(?, 'auto_reply_enabled', ?, unixepoch())
+     ON CONFLICT(account_id, key) DO NOTHING`,
+    accountId, autoReplyValue
+  );
+
+  // Client-level runtime defaults
+  const clientDefaults = {
+    'crawler_desired_enabled': crawlerDesiredValue,
+    'crawler_reported_enabled': '',
+    'crawler_last_heartbeat_at': '0',
+    'initial_crawl_session_count': '30',
+    'qianniu_last_heartbeat_at': '0',
+    'qianniu_page_url': '',
+    'qianniu_visible_order_count': '0',
+    'qianniu_scan_state': 'idle',
+    'qianniu_last_sync_at': '0',
+    'qianniu_last_sync_stats': '{}',
+  };
+
+  for (const [key, value] of Object.entries(clientDefaults)) {
+    await db.run(
+      `INSERT INTO client_runtime(client_id, key, value, updated_at)
+       VALUES(?, ?, ?, unixepoch())
+       ON CONFLICT(client_id, key) DO NOTHING`,
+      clientId, key, value
+    );
+  }
+}
+
+async function setInitialCrawlSessionCount(clientId, n) {
+  await setClientRuntime(clientId, 'initial_crawl_session_count', String(Math.max(1, Math.min(100, n))));
+}
+
+// ── Client commands ──────────────────────────────────────────────────────────
+
+async function requestCommand(clientId, commandType, payloadJson = '{}') {
+  const db = await getDb();
+  const requestedNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.run(
+    `INSERT INTO client_commands(client_id, command_type, requested_nonce, payload_json)
+     VALUES(?, ?, ?, ?)`,
+    clientId, commandType, requestedNonce, payloadJson
+  );
+  return { requestedNonce };
+}
+
+async function handleCommandNonce(clientId, commandType, handledNonce) {
+  const db = await getDb();
+  await db.run(
+    `UPDATE client_commands
+     SET handled_nonce = ?,
+         handled_at = unixepoch()
+     WHERE client_id = ? AND command_type = ? AND requested_nonce = ? AND handled_nonce IS NULL`,
+    handledNonce, clientId, commandType, handledNonce
+  );
+}
+
+async function getPendingCommand(clientId, commandType) {
+  const db = await getDb();
+  return db.get(
+    `SELECT * FROM client_commands
+     WHERE client_id = ? AND command_type = ? AND handled_nonce IS NULL
+     ORDER BY id DESC LIMIT 1`,
+    clientId, commandType
+  );
+}
+
+async function requestInitialCrawl(clientId) {
+  return requestCommand(clientId, 'initial_crawl');
+}
+
+async function requestQianniuSyncNow(clientId) {
+  return requestCommand(clientId, 'orders_sync_now');
+}
+
+async function requestQianniuFullScan(clientId) {
+  return requestCommand(clientId, 'orders_full_scan');
+}
+
+// ── Qianniu runtime ──────────────────────────────────────────────────────────
+
+function parseSettingsJson(value, fallback = {}) {
+  try {
+    const parsed = JSON.parse(value || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function updateQianniuHeartbeat(clientId, runtimeState = {}) {
+  const pageUrl = normalizeOptionalText(runtimeState.pageUrl) || '';
+  const visibleOrderCount = Number.isFinite(Number(runtimeState.visibleOrderCount))
+    ? String(Math.max(0, Number(runtimeState.visibleOrderCount)))
+    : '0';
+  const scanState = runtimeState.scanState === 'scanning' ? 'scanning' : 'idle';
+
+  await setClientRuntime(clientId, 'qianniu_page_url', pageUrl);
+  await setClientRuntime(clientId, 'qianniu_visible_order_count', visibleOrderCount);
+  await setClientRuntime(clientId, 'qianniu_scan_state', scanState);
+  await setClientRuntime(clientId, 'qianniu_last_heartbeat_at', String(Math.floor(Date.now() / 1000)));
+  await updateClientLastSeen(clientId);
+
+  if (runtimeState.scanNonceHandled) {
+    await handleCommandNonce(clientId, 'orders_full_scan', runtimeState.scanNonceHandled);
+  }
+  if (runtimeState.syncNonceHandled) {
+    await handleCommandNonce(clientId, 'orders_sync_now', runtimeState.syncNonceHandled);
+  }
+
+  return getQianniuRuntime(clientId);
+}
+
+async function getQianniuRuntime(clientId) {
+  const [
+    pageUrl,
+    visibleOrderCount,
+    scanState,
+    lastHeartbeatAt,
+    lastSyncAt,
+    lastSyncStats,
+  ] = await Promise.all([
+    getClientRuntime(clientId, 'qianniu_page_url', ''),
+    getClientRuntime(clientId, 'qianniu_visible_order_count', '0'),
+    getClientRuntime(clientId, 'qianniu_scan_state', 'idle'),
+    getClientRuntime(clientId, 'qianniu_last_heartbeat_at', '0'),
+    getClientRuntime(clientId, 'qianniu_last_sync_at', '0'),
+    getClientRuntime(clientId, 'qianniu_last_sync_stats', '{}'),
+  ]);
+
+  const pendingSyncNow = await getPendingCommand(clientId, 'orders_sync_now');
+  const pendingFullScan = await getPendingCommand(clientId, 'orders_full_scan');
+
+  const heartbeatTs = Number(lastHeartbeatAt || 0);
+
+  return {
+    isOnline: heartbeatTs > 0 && (Math.floor(Date.now() / 1000) - heartbeatTs) <= 12,
+    pageUrl: pageUrl || '',
+    visibleOrderCount: Number(visibleOrderCount || 0),
+    scanState: scanState === 'scanning' ? 'scanning' : 'idle',
+    lastHeartbeatAt: heartbeatTs,
+    lastSyncAt: Number(lastSyncAt || 0),
+    lastSyncStats: parseSettingsJson(lastSyncStats, {}),
+    syncNowNonce: pendingSyncNow?.requested_nonce || null,
+    fullScanNonce: pendingFullScan?.requested_nonce || null,
+  };
+}
+
+// ── Session resolution ───────────────────────────────────────────────────────
+
+async function resolveCanonicalSessionKey(db, accountId, chatKey, customerName, productId, messages = [], sessionId = null) {
   if (sessionId) {
     const existingBySessionId = await db.get(
-      `SELECT chat_key
-       FROM sessions
-       WHERE session_id = ?`,
-      sessionId
+      `SELECT chat_key FROM sessions WHERE account_id = ? AND session_id = ?`,
+      accountId, sessionId
     );
     if (existingBySessionId?.chat_key) {
       return existingBySessionId.chat_key;
@@ -600,16 +1155,15 @@ async function resolveCanonicalSessionKey(db, chatKey, customerName, productId, 
   const candidates = await db.all(
     `SELECT chat_key
      FROM sessions
-     WHERE customer_name = ?
-       AND product_id IS NOT NULL
-       AND product_id != ''`,
-    customerName
+     WHERE account_id = ? AND customer_name = ?
+       AND product_id IS NOT NULL AND product_id != ''`,
+    accountId, customerName
   );
 
   for (const candidate of candidates) {
     const dbMessages = await db.all(
-      'SELECT content, is_me FROM messages WHERE chat_key = ? ORDER BY seq ASC',
-      candidate.chat_key
+      'SELECT content, is_me FROM messages WHERE account_id = ? AND chat_key = ? ORDER BY seq ASC',
+      accountId, candidate.chat_key
     );
     if (areMessageSnapshotsEquivalent(dbMessages, messages)) {
       return candidate.chat_key;
@@ -619,27 +1173,13 @@ async function resolveCanonicalSessionKey(db, chatKey, customerName, productId, 
   return chatKey;
 }
 
-/**
- * 将历史上的无 ID 副本会话合并到真实会话键，并清理旧键残留。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @param {string} sourceChatKey - 旧的副本会话键。
- * @param {string} targetChatKey - 真实会话键。
- * @param {string} customerName - 当前买家名。
- * @param {string|null} productId - 当前商品 ID。
- * @returns {Promise<void>}
- */
-async function cleanupDuplicateSessionKey(db, sourceChatKey, targetChatKey, customerName, productId, sessionId) {
-  if (!sourceChatKey || sourceChatKey === targetChatKey) {
-    return;
-  }
+async function cleanupDuplicateSessionKey(db, accountId, sourceChatKey, targetChatKey, customerName, productId, sessionId) {
+  if (!sourceChatKey || sourceChatKey === targetChatKey) return;
 
   await db.run(
-    `UPDATE orders
-     SET chat_key = ?,
-         updated_at = unixepoch()
-     WHERE chat_key = ?`,
-    targetChatKey,
-    sourceChatKey
+    `UPDATE orders SET chat_key = ?, updated_at = unixepoch()
+     WHERE account_id = ? AND chat_key = ?`,
+    targetChatKey, accountId, sourceChatKey
   );
   await db.run(
     `UPDATE outgoing_messages
@@ -647,94 +1187,71 @@ async function cleanupDuplicateSessionKey(db, sourceChatKey, targetChatKey, cust
          customer_name = COALESCE(customer_name, ?),
          product_id = COALESCE(product_id, ?),
          session_id = COALESCE(session_id, ?)
-     WHERE chat_key = ?`,
-    targetChatKey,
-    customerName,
-    productId,
-    sessionId,
-    sourceChatKey
+     WHERE account_id = ? AND chat_key = ?`,
+    targetChatKey, customerName, productId, sessionId,
+    accountId, sourceChatKey
   );
-  await db.run(`DELETE FROM messages WHERE chat_key = ?`, sourceChatKey);
-  await db.run(`DELETE FROM outbox WHERE chat_key = ?`, sourceChatKey);
-  await db.run(`DELETE FROM sessions WHERE chat_key = ?`, sourceChatKey);
+  await db.run(`DELETE FROM messages WHERE account_id = ? AND chat_key = ?`, accountId, sourceChatKey);
+  await db.run(`DELETE FROM outbox WHERE account_id = ? AND chat_key = ?`, accountId, sourceChatKey);
+  await db.run(`DELETE FROM sessions WHERE account_id = ? AND chat_key = ?`, accountId, sourceChatKey);
 }
 
-/**
- * 清理没有任何聊天内容、也没有待发消息的空壳会话。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @param {string} chatKey - 需要检查的会话键。
- * @returns {Promise<boolean>} 是否实际删除了空壳会话。
- */
-async function cleanupEmptySessionShell(db, chatKey) {
-  if (!chatKey) {
-    return false;
-  }
+async function cleanupEmptySessionShell(db, accountId, chatKey) {
+  if (!chatKey) return false;
 
   const stats = await db.get(
     `SELECT
-       EXISTS(SELECT 1 FROM sessions WHERE chat_key = ?) AS has_session,
-       EXISTS(SELECT 1 FROM messages WHERE chat_key = ?) AS has_messages,
-       EXISTS(SELECT 1 FROM outgoing_messages WHERE chat_key = ?) AS has_outgoing,
-       EXISTS(SELECT 1 FROM orders WHERE chat_key = ?) AS has_orders`,
-    chatKey,
-    chatKey,
-    chatKey,
-    chatKey
+       EXISTS(SELECT 1 FROM sessions WHERE account_id = ? AND chat_key = ?) AS has_session,
+       EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND chat_key = ?) AS has_messages,
+       EXISTS(SELECT 1 FROM outgoing_messages WHERE account_id = ? AND chat_key = ?) AS has_outgoing,
+       EXISTS(SELECT 1 FROM orders WHERE account_id = ? AND chat_key = ?) AS has_orders`,
+    accountId, chatKey, accountId, chatKey, accountId, chatKey, accountId, chatKey
   );
 
   if (!stats?.has_session || stats.has_messages || stats.has_outgoing || stats.has_orders) {
     return false;
   }
 
-  await db.run(`DELETE FROM outbox WHERE chat_key = ?`, chatKey);
-  await db.run(`DELETE FROM sessions WHERE chat_key = ?`, chatKey);
+  await db.run(`DELETE FROM outbox WHERE account_id = ? AND chat_key = ?`, accountId, chatKey);
+  await db.run(`DELETE FROM sessions WHERE account_id = ? AND chat_key = ?`, accountId, chatKey);
   return true;
 }
 
-/**
- * 当闲鱼会话补齐 buyer_user_id 后，尽力把历史未关联订单回填到该会话。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @param {string} chatKey - 当前会话键。
- * @param {string|null} buyerUserId - 买家 userId。
- * @param {string|null} productId - 商品 ID。
- * @returns {Promise<void>}
- */
-async function reconcileOrdersForSession(db, chatKey, buyerUserId, productId) {
-  if (!chatKey || !buyerUserId || !productId) {
-    return;
-  }
+async function reconcileOrdersForSession(db, accountId, chatKey, buyerUserId, productId) {
+  if (!chatKey || !buyerUserId || !productId) return;
 
   const matches = await db.get(
-    `SELECT COUNT(*) AS cnt
-     FROM sessions
-     WHERE buyer_user_id = ?
-       AND product_id = ?`,
-    buyerUserId,
-    productId
+    `SELECT COUNT(*) AS cnt FROM sessions
+     WHERE account_id = ? AND buyer_user_id = ? AND product_id = ?`,
+    accountId, buyerUserId, productId
   );
-  if ((matches?.cnt || 0) !== 1) {
-    return;
-  }
+  if ((matches?.cnt || 0) !== 1) return;
 
   await db.run(
-    `UPDATE orders
-     SET chat_key = ?,
-         updated_at = unixepoch()
-     WHERE buyer_user_id = ?
-       AND product_id = ?
+    `UPDATE orders SET chat_key = ?, updated_at = unixepoch()
+     WHERE account_id = ? AND buyer_user_id = ? AND product_id = ?
        AND (chat_key IS NULL OR chat_key != ?)`,
-    chatKey,
-    buyerUserId,
-    productId,
-    chatKey
+    chatKey, accountId, buyerUserId, productId, chatKey
+  );
+}
+
+async function backfillMessageTransportMetadata(db, accountId, chatKey, seq, message = {}) {
+  const externalMessageId = normalizeOptionalText(message.messageId);
+  const replyToMessageId = normalizeOptionalText(message.replyMessageId);
+  if (!externalMessageId && !replyToMessageId) return;
+
+  await db.run(
+    `UPDATE messages
+     SET external_message_id = COALESCE(NULLIF(external_message_id, ''), ?),
+         reply_to_message_id = COALESCE(NULLIF(reply_to_message_id, ''), ?)
+     WHERE account_id = ? AND chat_key = ? AND seq = ?`,
+    externalMessageId, replyToMessageId, accountId, chatKey, seq
   );
 }
 
 // ── Ingest ───────────────────────────────────────────────────────────────────
-// sessions = { [chatKey]: { customerName, productId, product, messages[] } }
-// Fully idempotent — safe to POST the same snapshot repeatedly.
 
-async function ingest(sessions) {
+async function ingest(accountId, clientId, sessions) {
   const db = await getDb();
   const results = {};
 
@@ -758,7 +1275,7 @@ async function ingest(sessions) {
           : '{}';
 
       if (!messages.length) {
-        const cleanedUpEmptyShell = await cleanupEmptySessionShell(db, chatKey);
+        const cleanedUpEmptyShell = await cleanupEmptySessionShell(db, accountId, chatKey);
         results[chatKey] = {
           isNewSession: false,
           newMsgCount: 0,
@@ -766,30 +1283,26 @@ async function ingest(sessions) {
           canonicalChatKey: chatKey,
           skipped: true,
           reason: 'empty_session',
-          cleanedUpEmptyShell
+          cleanedUpEmptyShell,
         };
         continue;
       }
 
       const canonicalChatKey = await resolveCanonicalSessionKey(
-        db,
-        chatKey,
-        effectiveCustomerName,
-        productId,
-        messages,
-        normalizedSessionId
+        db, accountId, chatKey, effectiveCustomerName, productId, messages, normalizedSessionId
       );
       const productJson = JSON.stringify(product);
 
       const existing = await db.get(
-        'SELECT chat_key FROM sessions WHERE chat_key = ?', canonicalChatKey
+        'SELECT chat_key FROM sessions WHERE account_id = ? AND chat_key = ?',
+        accountId, canonicalChatKey
       );
 
-      // Upsert session; only overwrite product_json when new value is non-empty
+      // Upsert session
       await db.run(`
-        INSERT INTO sessions(chat_key, customer_name, product_id, product_json, session_id, session_info_json, buyer_user_id)
-        VALUES(?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_key) DO UPDATE SET
+        INSERT INTO sessions(account_id, chat_key, customer_name, product_id, product_json, session_id, session_info_json, buyer_user_id, last_seen_client_id)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, chat_key) DO UPDATE SET
           customer_name = excluded.customer_name,
           product_id    = CASE
             WHEN excluded.product_id IS NOT NULL THEN excluded.product_id
@@ -811,25 +1324,21 @@ async function ingest(sessions) {
             WHEN excluded.buyer_user_id IS NOT NULL AND excluded.buyer_user_id != '' THEN excluded.buyer_user_id
             ELSE sessions.buyer_user_id
           END,
+          last_seen_client_id = excluded.last_seen_client_id,
           updated_at = unixepoch()
-      `, canonicalChatKey, effectiveCustomerName, productId, productJson, normalizedSessionId, sessionInfoJson, buyerUserId);
+      `, accountId, canonicalChatKey, effectiveCustomerName, productId, productJson, normalizedSessionId, sessionInfoJson, buyerUserId, clientId);
 
-      await reconcileOrdersForSession(db, canonicalChatKey, buyerUserId, productId);
+      await reconcileOrdersForSession(db, accountId, canonicalChatKey, buyerUserId, productId);
 
       await cleanupDuplicateSessionKey(
-        db,
-        chatKey,
-        canonicalChatKey,
-        effectiveCustomerName,
-        productId,
-        normalizedSessionId
+        db, accountId, chatKey, canonicalChatKey, effectiveCustomerName, productId, normalizedSessionId
       );
 
       if (!existing) {
         await db.run(
-          `INSERT INTO outbox(event_type, chat_key, payload)
-           VALUES('new_session', ?, ?)`,
-          canonicalChatKey,
+          `INSERT INTO outbox(account_id, event_type, chat_key, payload)
+           VALUES(?, 'new_session', ?, ?)`,
+          accountId, canonicalChatKey,
           JSON.stringify({
             chatKey: canonicalChatKey,
             customerName: effectiveCustomerName,
@@ -841,8 +1350,8 @@ async function ingest(sessions) {
       }
 
       const dbMsgs = await db.all(
-        'SELECT id, content, is_me, seq, type FROM messages WHERE chat_key = ? ORDER BY seq ASC',
-        canonicalChatKey
+        'SELECT id, content, is_me, seq, type FROM messages WHERE account_id = ? AND chat_key = ? ORDER BY seq ASC',
+        accountId, canonicalChatKey
       );
 
       let newMsgCount = 0;
@@ -850,7 +1359,6 @@ async function ingest(sessions) {
       let currentSeq = dbMsgs.length > 0 ? dbMsgs[dbMsgs.length - 1].seq + 1 : 0;
 
       if (messages && messages.length > 0) {
-        // 1. Check if the entire incoming array is already a contiguous sub-array in DB
         let isSubstring = false;
         let substringStart = -1;
         if (dbMsgs.length >= messages.length) {
@@ -871,7 +1379,6 @@ async function ingest(sessions) {
         }
 
         if (!isSubstring) {
-          // 2. Find the maximum overlap between a suffix of DB and a prefix of Incoming
           let overlapLen = 0;
           const maxOverlap = Math.min(dbMsgs.length, messages.length);
 
@@ -893,15 +1400,10 @@ async function ingest(sessions) {
 
           for (let i = 0; i < overlapLen; i++) {
             await backfillMessageTransportMetadata(
-              db,
-              canonicalChatKey,
-              dbMsgs[dbMsgs.length - overlapLen + i].seq,
-              messages[i]
+              db, accountId, canonicalChatKey, dbMsgs[dbMsgs.length - overlapLen + i].seq, messages[i]
             );
           }
 
-          // 3. Append the remaining incoming messages
-          const crypto = require('crypto');
           for (let i = overlapLen; i < messages.length; i++) {
             const {
               content,
@@ -917,32 +1419,15 @@ async function ingest(sessions) {
 
             const result = await db.run(
               `INSERT OR IGNORE INTO messages(
-                 chat_key,
-                 msg_hash,
-                 seq,
-                 content,
-                 is_me,
-                 type,
-                 external_message_id,
-                 reply_to_message_id
+                 account_id, chat_key, msg_hash, seq, content, is_me, type,
+                 external_message_id, reply_to_message_id
                )
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-              canonicalChatKey,
-              hash,
-              currentSeq,
-              content,
-              isMe ? 1 : 0,
-              type,
-              normalizeOptionalText(messageId),
-              normalizeOptionalText(replyMessageId)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              accountId, canonicalChatKey, hash, currentSeq, content, isMe ? 1 : 0, type,
+              normalizeOptionalText(messageId), normalizeOptionalText(replyMessageId)
             );
 
-            await backfillMessageTransportMetadata(
-              db,
-              canonicalChatKey,
-              currentSeq,
-              messages[i]
-            );
+            await backfillMessageTransportMetadata(db, accountId, canonicalChatKey, currentSeq, messages[i]);
 
             if (result.changes > 0) {
               newMsgCount++;
@@ -953,10 +1438,7 @@ async function ingest(sessions) {
         } else if (substringStart >= 0) {
           for (let i = 0; i < messages.length; i++) {
             await backfillMessageTransportMetadata(
-              db,
-              canonicalChatKey,
-              dbMsgs[substringStart + i].seq,
-              messages[i]
+              db, accountId, canonicalChatKey, dbMsgs[substringStart + i].seq, messages[i]
             );
           }
         }
@@ -964,9 +1446,9 @@ async function ingest(sessions) {
 
       if (newMsgCount > 0) {
         await db.run(
-          `INSERT INTO outbox(event_type, chat_key, payload)
-           VALUES('new_messages', ?, ?)`,
-          canonicalChatKey,
+          `INSERT INTO outbox(account_id, event_type, chat_key, payload)
+           VALUES(?, 'new_messages', ?, ?)`,
+          accountId, canonicalChatKey,
           JSON.stringify({
             chatKey: canonicalChatKey,
             sessionId: normalizedSessionId,
@@ -979,7 +1461,7 @@ async function ingest(sessions) {
         isNewSession: !existing,
         newMsgCount,
         totalMessages: messages.length,
-        canonicalChatKey
+        canonicalChatKey,
       };
     }
     await db.exec('COMMIT');
@@ -993,234 +1475,73 @@ async function ingest(sessions) {
 
 // ── Queries ──────────────────────────────────────────────────────────────────
 
-async function listSessions() {
+async function listSessions(accountId) {
   const db = await getDb();
   return db.all(`
     SELECT
-      s.chat_key, s.customer_name, s.product_id, s.product_json,
-      s.session_id, s.session_info_json, s.buyer_user_id,
+      s.chat_key, s.account_id, s.customer_name, s.product_id, s.product_json,
+      s.session_id, s.session_info_json, s.buyer_user_id, s.last_seen_client_id,
       s.created_at, s.updated_at,
       COUNT(m.id) AS message_count,
-      (SELECT content FROM messages WHERE chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_message,
-      (SELECT is_me   FROM messages WHERE chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_is_me,
+      (SELECT content FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_message,
+      (SELECT is_me   FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_is_me,
       (
         SELECT MAX(t) FROM (
-          SELECT * FROM (SELECT ingested_at as t FROM messages WHERE chat_key = s.chat_key ORDER BY seq DESC LIMIT 1)
+          SELECT * FROM (SELECT ingested_at as t FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1)
           UNION ALL
-          SELECT * FROM (SELECT created_at as t FROM outgoing_messages WHERE chat_key = s.chat_key ORDER BY id DESC LIMIT 1)
+          SELECT * FROM (SELECT created_at as t FROM outgoing_messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY id DESC LIMIT 1)
         )
       ) AS last_time
     FROM sessions s
-    LEFT JOIN messages m ON m.chat_key = s.chat_key
-    GROUP BY s.chat_key
+    LEFT JOIN messages m ON m.account_id = s.account_id AND m.chat_key = s.chat_key
+    WHERE s.account_id = ?
+    GROUP BY s.account_id, s.chat_key
     ORDER BY COALESCE(last_time, s.updated_at) DESC
-  `);
+  `, accountId);
 }
 
-async function getSession(chatKey) {
+async function getSession(accountId, chatKey) {
   const db = await getDb();
-  return db.get('SELECT * FROM sessions WHERE chat_key = ?', chatKey);
+  return db.get('SELECT * FROM sessions WHERE account_id = ? AND chat_key = ?', accountId, chatKey);
 }
 
-/**
- * 根据 session_id 查询会话，供精准发送入队和迁移兼容使用。
- * @param {string} sessionId - 会话 ID。
- * @returns {Promise<any | undefined>} 命中的会话记录。
- */
-async function getSessionBySessionId(sessionId) {
+async function getSessionBySessionId(accountId, sessionId) {
   const db = await getDb();
   return db.get(
-    `SELECT *
-     FROM sessions
-     WHERE session_id = ?`,
-    sessionId
+    `SELECT * FROM sessions WHERE account_id = ? AND session_id = ?`,
+    accountId, sessionId
   );
 }
 
-async function getMessages(chatKey) {
+async function getMessages(accountId, chatKey) {
   const db = await getDb();
   return db.all(
     `SELECT
-       id,
-       chat_key,
-       msg_hash,
-       seq,
-       content,
-       is_me,
-       type,
-       ingested_at,
-       external_message_id,
-       reply_to_message_id
+       id, account_id, chat_key, msg_hash, seq, content, is_me, type,
+       ingested_at, external_message_id, reply_to_message_id
      FROM messages
-     WHERE chat_key = ?
+     WHERE account_id = ? AND chat_key = ?
      ORDER BY seq ASC`,
-    chatKey
+    accountId, chatKey
   );
 }
 
-/**
- * 归一化任意可选文本字段，统一把空串收敛为 null。
- * @param {any} value - 原始字段值。
- * @returns {string | null} 去空白后的文本。
- */
-function normalizeOptionalText(value) {
-  if (value == null) {
-    return null;
-  }
+// ── Order ingestion ──────────────────────────────────────────────────────────
 
-  const normalized = String(value).trim();
-  return normalized ? normalized : null;
-}
-
-/**
- * 将页面原生 messageId 元数据回填到已存在的消息行，兼容历史消息只有内容没有外部 ID 的情况。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @param {string} chatKey - 会话键。
- * @param {number} seq - 消息序号。
- * @param {{ messageId?: string | null, replyMessageId?: string | null }} message - 当前采集到的消息载荷。
- * @returns {Promise<void>}
- */
-async function backfillMessageTransportMetadata(db, chatKey, seq, message = {}) {
-  const externalMessageId = normalizeOptionalText(message.messageId);
-  const replyToMessageId = normalizeOptionalText(message.replyMessageId);
-  if (!externalMessageId && !replyToMessageId) {
-    return;
-  }
-
-  await db.run(
-    `UPDATE messages
-     SET external_message_id = COALESCE(NULLIF(external_message_id, ''), ?),
-         reply_to_message_id = COALESCE(NULLIF(reply_to_message_id, ''), ?)
-     WHERE chat_key = ? AND seq = ?`,
-    externalMessageId,
-    replyToMessageId,
-    chatKey,
-    seq
-  );
-}
-
-/**
- * 将千牛页面上的本地时间文案解析成 Unix 秒级时间戳。
- * @param {string | null | undefined} text - 页面上提取到的时间文案。
- * @returns {number | null} 解析成功返回 Unix 时间戳，失败返回 null。
- */
-function parseQianniuDateTimeToUnix(text) {
-  const normalized = normalizeOptionalText(text);
-  if (!normalized) {
-    return null;
-  }
-
-  const match = normalized.match(
-    /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/
-  );
-  if (!match) {
-    return null;
-  }
-
-  const [, year, month, day, hour, minute, second = '00'] = match;
-  const parsed = new Date(
-    Number(year),
-    Number(month) - 1,
-    Number(day),
-    Number(hour),
-    Number(minute),
-    Number(second)
-  );
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-
-  return Math.floor(parsed.getTime() / 1000);
-}
-
-/**
- * 归一化千牛卡片里的金额文本，统一输出为带人民币符号的展示值。
- * @param {string | null | undefined} text - 原始金额文本。
- * @returns {string | null} 归一化后的金额文本。
- */
-function normalizeQianniuPriceText(text) {
-  const normalized = normalizeOptionalText(text);
-  if (!normalized) {
-    return null;
-  }
-
-  const match = normalized.match(/([0-9]+(?:\.[0-9]{1,2})?)/);
-  if (!match) {
-    return null;
-  }
-
-  return `￥${match[1]}`;
-}
-
-/**
- * 将购买数量字段归一化为正整数。
- * @param {string | number | null | undefined} value - 原始数量值。
- * @returns {number | null} 解析成功返回数量，否则返回 null。
- */
-function parseQianniuQuantity(value) {
-  const normalized = normalizeOptionalText(value);
-  if (!normalized) {
-    return null;
-  }
-
-  const match = normalized.match(/(\d+)/);
-  if (!match) {
-    return null;
-  }
-
-  const quantity = Number(match[1]);
-  if (!Number.isInteger(quantity) || quantity <= 0) {
-    return null;
-  }
-
-  return quantity;
-}
-
-/**
- * 将对象安全序列化成 JSON，避免单条脏数据导致整批订单同步失败。
- * @param {Record<string, any>} payload - 待序列化对象。
- * @returns {string} 可落库的 JSON 字符串。
- */
-function stringifyJsonSafely(payload) {
-  try {
-    return JSON.stringify(payload || {});
-  } catch (_) {
-    return '{}';
-  }
-}
-
-/**
- * 根据 buyer_user_id + product_id 精准匹配唯一会话。
- * @param {import('sqlite').Database} db - SQLite 连接。
- * @param {string | null} buyerUserId - 买家 userId。
- * @param {string | null} productId - 商品 ID。
- * @returns {Promise<string | null>} 命中的唯一 chat_key；否则返回 null。
- */
-async function resolveOrderChatKey(db, buyerUserId, productId) {
-  if (!buyerUserId || !productId) {
-    return null;
-  }
+async function resolveOrderChatKey(db, accountId, buyerUserId, productId) {
+  if (!buyerUserId || !productId) return null;
 
   const matches = await db.all(
-    `SELECT chat_key
-     FROM sessions
-     WHERE buyer_user_id = ?
-       AND product_id = ?
+    `SELECT chat_key FROM sessions
+     WHERE account_id = ? AND buyer_user_id = ? AND product_id = ?
      ORDER BY updated_at DESC, chat_key ASC
      LIMIT 2`,
-    buyerUserId,
-    productId
+    accountId, buyerUserId, productId
   );
   return matches.length === 1 ? matches[0].chat_key : null;
 }
 
-/**
- * 批量写入千牛订单快照，并按 buyer_user_id + product_id 自动回填会话关联。
- * @param {any[]} orders - 千牛脚本上传的订单列表。
- * @param {{ mode?: string, pageNo?: number | null, scanNonce?: string | null, collectedAt?: string | number | null }} pageContext - 本次采集上下文。
- * @returns {Promise<{inserted: number, updated: number, matched: number, unmatched: number, skipped: number, total: number}>} 本次同步统计。
- */
-async function ingestOrders(orders = [], pageContext = {}) {
+async function ingestOrders(accountId, clientId, orders = [], pageContext = {}) {
   const db = await getDb();
   const safeOrders = Array.isArray(orders) ? orders : [];
   const stats = {
@@ -1254,20 +1575,12 @@ async function ingestOrders(orders = [], pageContext = {}) {
       const orderStatusText = normalizeOptionalText(order?.orderStatusText);
       const paidAt = parseQianniuDateTimeToUnix(order?.paidAtText);
       const latestShipAt = parseQianniuDateTimeToUnix(order?.latestShipAtText);
-      const chatKey = await resolveOrderChatKey(db, buyerUserId, productId);
+      const chatKey = await resolveOrderChatKey(db, accountId, buyerUserId, productId);
       const rawJson = stringifyJsonSafely({
         raw: order?.raw || null,
         extracted: {
-          orderId,
-          buyerName,
-          buyerUserId,
-          productId,
-          productTitle,
-          productPrice,
-          purchaseQuantity,
-          receiverName,
-          receiverPhone,
-          receiverAddress,
+          orderId, buyerName, buyerUserId, productId, productTitle, productPrice,
+          purchaseQuantity, receiverName, receiverPhone, receiverAddress,
           orderStatusText,
           paidAtText: normalizeOptionalText(order?.paidAtText),
           latestShipAtText: normalizeOptionalText(order?.latestShipAtText),
@@ -1279,35 +1592,21 @@ async function ingestOrders(orders = [], pageContext = {}) {
           collectedAt: pageContext?.collectedAt ?? null,
         },
       });
+
       const existing = await db.get(
-        `SELECT id
-         FROM orders
-         WHERE order_id = ?`,
-        orderId
+        `SELECT id FROM orders WHERE account_id = ? AND order_id = ?`,
+        accountId, orderId
       );
 
       await db.run(
         `INSERT INTO orders(
-           order_id,
-           chat_key,
-           buyer_name,
-           buyer_user_id,
-           product_id,
-           product_title,
-           product_price,
-           purchase_quantity,
-           receiver_name,
-           receiver_phone,
-           receiver_address,
-           order_status_text,
-           paid_at,
-           latest_ship_at,
-           last_seen_at,
-           raw_json,
-           updated_at
+           account_id, order_id, chat_key,
+           buyer_name, buyer_user_id, product_id, product_title, product_price,
+           purchase_quantity, receiver_name, receiver_phone, receiver_address,
+           order_status_text, paid_at, latest_ship_at, last_seen_at, raw_json, updated_at
          )
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
-         ON CONFLICT(order_id) DO UPDATE SET
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+         ON CONFLICT(account_id, order_id) DO UPDATE SET
            chat_key = excluded.chat_key,
            buyer_name = excluded.buyer_name,
            buyer_user_id = excluded.buyer_user_id,
@@ -1324,35 +1623,14 @@ async function ingestOrders(orders = [], pageContext = {}) {
            last_seen_at = excluded.last_seen_at,
            raw_json = excluded.raw_json,
            updated_at = unixepoch()`,
-        orderId,
-        chatKey,
-        buyerName,
-        buyerUserId,
-        productId,
-        productTitle,
-        productPrice,
-        purchaseQuantity,
-        receiverName,
-        receiverPhone,
-        receiverAddress,
-        orderStatusText,
-        paidAt,
-        latestShipAt,
-        nowTs,
-        rawJson
+        accountId, orderId, chatKey,
+        buyerName, buyerUserId, productId, productTitle, productPrice,
+        purchaseQuantity, receiverName, receiverPhone, receiverAddress,
+        orderStatusText, paidAt, latestShipAt, nowTs, rawJson
       );
 
-      if (existing) {
-        stats.updated++;
-      } else {
-        stats.inserted++;
-      }
-
-      if (chatKey) {
-        stats.matched++;
-      } else {
-        stats.unmatched++;
-      }
+      if (existing) { stats.updated++; } else { stats.inserted++; }
+      if (chatKey) { stats.matched++; } else { stats.unmatched++; }
     }
 
     await db.exec('COMMIT');
@@ -1361,32 +1639,24 @@ async function ingestOrders(orders = [], pageContext = {}) {
     throw error;
   }
 
-  await setAppSetting('qianniu_last_sync_at', String(nowTs));
-  await setAppSetting(
-    'qianniu_last_sync_stats',
-    stringifyJsonSafely({
-      ...stats,
-      pageContext: {
-        mode: normalizeOptionalText(pageContext?.mode) || 'current-page',
-        pageNo: pageContext?.pageNo ?? null,
-        scanNonce: normalizeOptionalText(pageContext?.scanNonce),
-        collectedAt: pageContext?.collectedAt ?? null,
-      },
-    })
-  );
+  await setClientRuntime(clientId, 'qianniu_last_sync_at', String(nowTs));
+  await setClientRuntime(clientId, 'qianniu_last_sync_stats', stringifyJsonSafely({
+    ...stats,
+    pageContext: {
+      mode: normalizeOptionalText(pageContext?.mode) || 'current-page',
+      pageNo: pageContext?.pageNo ?? null,
+      scanNonce: normalizeOptionalText(pageContext?.scanNonce),
+      collectedAt: pageContext?.collectedAt ?? null,
+    },
+  }));
 
   return stats;
 }
 
-/**
- * 查询订单列表，支持按关联状态、会话键和关键字过滤。
- * @param {{ linked?: string, q?: string, limit?: number, chatKey?: string | null }} options - 查询过滤条件。
- * @returns {Promise<any[]>} 满足条件的订单列表。
- */
-async function listOrders({ linked = 'all', q = '', limit = 200, chatKey = null } = {}) {
+async function listOrders(accountId, { linked = 'all', q = '', limit = 200, chatKey = null } = {}) {
   const db = await getDb();
-  const filters = [];
-  const params = [];
+  const filters = ['o.account_id = ?'];
+  const params = [accountId];
   const normalizedLinked = ['all', 'linked', 'unlinked'].includes(linked) ? linked : 'all';
   const normalizedQuery = normalizeOptionalText(q);
   const normalizedChatKey = normalizeOptionalText(chatKey);
@@ -1416,20 +1686,10 @@ async function listOrders({ linked = 'all', q = '', limit = 200, chatKey = null 
       OR COALESCE(o.receiver_phone, '') LIKE ?
       OR COALESCE(o.receiver_address, '') LIKE ?
     )`);
-    params.push(
-      likeQuery,
-      likeQuery,
-      likeQuery,
-      likeQuery,
-      likeQuery,
-      likeQuery,
-      likeQuery,
-      likeQuery,
-      likeQuery
-    );
+    params.push(likeQuery, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery);
   }
 
-  const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const whereSql = `WHERE ${filters.join(' AND ')}`;
   return db.all(
     `SELECT o.*
      FROM orders o
@@ -1441,30 +1701,21 @@ async function listOrders({ linked = 'all', q = '', limit = 200, chatKey = null 
   );
 }
 
-/**
- * 返回某个闲鱼会话已关联的订单列表。
- * @param {string} chatKey - 会话键。
- * @param {number} limit - 返回条数上限。
- * @returns {Promise<any[]>} 与会话关联的订单列表。
- */
-async function listOrdersByChatKey(chatKey, limit = 20) {
-  return listOrders({ chatKey, limit, linked: 'linked' });
+async function listOrdersByChatKey(accountId, chatKey, limit = 20) {
+  return listOrders(accountId, { chatKey, limit, linked: 'linked' });
 }
 
-// ── Outgoing messages ─────────────────────────────────────────────────────────
-// Messages queued to be sent by OpenClaw browser automation.
+// ── Outgoing messages ────────────────────────────────────────────────────────
 
-/**
- * 将待发送消息压入 outgoing_messages 队列，并补齐路由字段。
- * @param {string} chatKey - 会话唯一键。
- * @param {string} content - 待发送内容。
- * @param {string|null} customerName - 可选客户名，未传则从 session 回填。
- * @param {string|null} productId - 可选商品 ID，未传则从 session 回填。
- * @param {'ai'|'manual'} source - 消息来源，便于 UI 区分人工/AI。
- * @param {string|null} sessionId - 可选会话 ID，未传则从 session 回填。
- * @returns {Promise<{id: number}>} 新入队消息的主键。
- */
-async function addOutgoingMessage(chatKey, contentOrPayload, customerName = null, productId = null, source = 'ai', sessionId = null) {
+const OUTGOING_LIST_COLUMNS = [
+  'id', 'account_id', 'chat_key', 'customer_name', 'product_id', 'session_id',
+  'content', 'message_type', 'media_name',
+  'reply_to_external_message_id', 'reply_to_preview', 'reply_to_type',
+  'target_client_id', 'claimed_by_client_id',
+  'status', 'created_at', 'sent_at', 'claimed_at', 'error', 'retries', 'source',
+].join(', ');
+
+async function addOutgoingMessage(accountId, chatKey, contentOrPayload, customerName = null, productId = null, source = 'ai', sessionId = null, targetClientId = null) {
   const db = await getDb();
   let payload = null;
 
@@ -1474,6 +1725,7 @@ async function addOutgoingMessage(chatKey, contentOrPayload, customerName = null
     productId = payload.productId ?? productId;
     source = payload.source ?? source;
     sessionId = payload.sessionId ?? sessionId;
+    targetClientId = payload.targetClientId ?? targetClientId;
   }
 
   const content = normalizeOptionalText(payload?.content ?? contentOrPayload) || '';
@@ -1486,91 +1738,71 @@ async function addOutgoingMessage(chatKey, contentOrPayload, customerName = null
     ? 'image'
     : (payload?.replyToType === 'text' ? 'text' : null);
 
-  // 如果没传 customerName/productId/sessionId，从 session 表查
-  if (!customerName || !productId || !sessionId) {
+  // If not provided, look up from session
+  if (!customerName || !productId || !sessionId || !targetClientId) {
     const session = await db.get(
-      'SELECT customer_name, product_id, session_id FROM sessions WHERE chat_key = ?',
-      chatKey
+      'SELECT customer_name, product_id, session_id, last_seen_client_id FROM sessions WHERE account_id = ? AND chat_key = ?',
+      accountId, chatKey
     );
     if (session) {
       customerName = customerName || session.customer_name;
       productId = productId || session.product_id;
       sessionId = sessionId || session.session_id || null;
+      targetClientId = targetClientId || session.last_seen_client_id || null;
     }
   }
+
   const result = await db.run(
     `INSERT INTO outgoing_messages(
-       chat_key,
-       customer_name,
-       product_id,
-       session_id,
-       content,
-       source,
-       message_type,
-       media_data,
-       media_name,
-       reply_to_external_message_id,
-       reply_to_preview,
-       reply_to_type
+       account_id, chat_key, customer_name, product_id, session_id,
+       content, source, message_type, media_data, media_name,
+       reply_to_external_message_id, reply_to_preview, reply_to_type,
+       target_client_id
      )
-     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    chatKey,
-    customerName,
-    productId,
-    sessionId,
-    content,
-    source,
-    messageType,
-    mediaData,
-    mediaName,
-    replyToExternalMessageId,
-    replyToPreview,
-    replyToType
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    accountId, chatKey, customerName, productId, sessionId,
+    content, source, messageType, mediaData, mediaName,
+    replyToExternalMessageId, replyToPreview, replyToType,
+    targetClientId
   );
   return { id: result.lastID };
 }
 
-async function listOutgoingMessages(chatKey, status) {
+async function listOutgoingMessages(accountId, chatKey, status) {
   const db = await getDb();
   if (chatKey && status) {
     return db.all(
-      `SELECT ${OUTGOING_LIST_COLUMNS}
-       FROM outgoing_messages
-       WHERE chat_key = ? AND status = ?
+      `SELECT ${OUTGOING_LIST_COLUMNS} FROM outgoing_messages
+       WHERE account_id = ? AND chat_key = ? AND status = ?
        ORDER BY id ASC`,
-      chatKey, status
+      accountId, chatKey, status
     );
   }
   if (chatKey) {
     return db.all(
-      `SELECT ${OUTGOING_LIST_COLUMNS}
-       FROM outgoing_messages
-       WHERE chat_key = ?
-       ORDER BY id DESC
-       LIMIT 100`,
-      chatKey
+      `SELECT ${OUTGOING_LIST_COLUMNS} FROM outgoing_messages
+       WHERE account_id = ? AND chat_key = ?
+       ORDER BY id DESC LIMIT 100`,
+      accountId, chatKey
     );
   }
   if (status) {
     return db.all(
-      `SELECT ${OUTGOING_LIST_COLUMNS}
-       FROM outgoing_messages
-       WHERE status = ?
-       ORDER BY id ASC
-       LIMIT 100`,
-      status
+      `SELECT ${OUTGOING_LIST_COLUMNS} FROM outgoing_messages
+       WHERE account_id = ? AND status = ?
+       ORDER BY id ASC LIMIT 100`,
+      accountId, status
     );
   }
   return db.all(
-    `SELECT ${OUTGOING_LIST_COLUMNS}
-     FROM outgoing_messages
-     ORDER BY id DESC
-     LIMIT 100`
+    `SELECT ${OUTGOING_LIST_COLUMNS} FROM outgoing_messages
+     WHERE account_id = ?
+     ORDER BY id DESC LIMIT 100`,
+    accountId
   );
 }
 
-// Mark a message as sent or failed (called by OpenClaw after browser action)
-async function updateOutgoingStatus(id, status, error = null) {
+async function updateOutgoingStatus(id, clientId, status, error = null) {
   const db = await getDb();
   await db.run(
     `UPDATE outgoing_messages
@@ -1580,35 +1812,37 @@ async function updateOutgoingStatus(id, status, error = null) {
          error = ?,
          retries = CASE WHEN ? = 'failed' THEN retries + 1 ELSE retries END,
          last_attempt_at = unixepoch()
-     WHERE id = ?`,
-    status, status, error, status, id
+     WHERE id = ?
+       AND claimed_by_client_id = ?`,
+    status, status, error, status, id, clientId
   );
 }
 
-/**
- * 原子领取一条待发消息，避免浏览器端全量扫描 pending 队列。
- * @returns {Promise<any | null>} 领取成功的待发消息；没有可处理任务时返回 null。
- */
-async function claimOutgoingMessage() {
+async function claimOutgoingMessage(clientId) {
   const db = await getDb();
   const staleBefore = Math.floor(Date.now() / 1000) - OUTGOING_CLAIM_STALE_SECONDS;
 
   await db.exec('BEGIN IMMEDIATE');
   try {
+    // Only claim messages targeted at this client (or with null target)
     const row = await db.get(
       `SELECT
          om.*,
          s.session_id AS session_row_id,
          s.session_info_json AS session_row_info_json
        FROM outgoing_messages om
-       LEFT JOIN sessions s ON s.chat_key = om.chat_key
-       WHERE om.status = 'pending'
-          OR (om.status = 'sending' AND COALESCE(om.claimed_at, 0) <= ?)
+       LEFT JOIN sessions s ON s.account_id = om.account_id AND s.chat_key = om.chat_key
+       WHERE (om.target_client_id = ? OR om.target_client_id IS NULL)
+         AND (
+           om.status = 'pending'
+           OR (om.status = 'sending' AND COALESCE(om.claimed_at, 0) <= ?)
+         )
        ORDER BY
+         CASE WHEN om.target_client_id = ? THEN 0 ELSE 1 END,
          CASE WHEN om.status = 'pending' THEN 0 ELSE 1 END,
          om.id ASC
        LIMIT 1`,
-      staleBefore
+      clientId, staleBefore, clientId
     );
 
     if (!row) {
@@ -1620,6 +1854,7 @@ async function claimOutgoingMessage() {
       `UPDATE outgoing_messages
        SET status = 'sending',
            claimed_at = unixepoch(),
+           claimed_by_client_id = ?,
            last_attempt_at = unixepoch(),
            session_id = COALESCE(session_id, ?)
        WHERE id = ?
@@ -1627,6 +1862,7 @@ async function claimOutgoingMessage() {
            status = 'pending'
            OR (status = 'sending' AND COALESCE(claimed_at, 0) <= ?)
          )`,
+      clientId,
       row.session_id || row.session_row_id || null,
       row.id,
       staleBefore
@@ -1642,6 +1878,7 @@ async function claimOutgoingMessage() {
       ...row,
       status: 'sending',
       claimed_at: Math.floor(Date.now() / 1000),
+      claimed_by_client_id: clientId,
       session_id: row.session_id || row.session_row_id || null,
       session_info_json: row.session_row_info_json || '{}',
     };
@@ -1651,8 +1888,7 @@ async function claimOutgoingMessage() {
   }
 }
 
-
-// ── Outbox events (for auto-reply worker) ─────────────────────────────────────
+// ── Outbox events (for auto-reply worker) ────────────────────────────────────
 
 async function getUnprocessedOutbox(eventType = 'new_messages', limit = 20) {
   const db = await getDb();
@@ -1671,409 +1907,64 @@ async function markOutboxProcessed(id) {
   );
 }
 
-// Check last message direction for a chat_key (0=buyer, 1=seller)
-async function getLastMessageDirection(chatKey) {
+async function getLastMessageDirection(accountId, chatKey) {
   const db = await getDb();
   const row = await db.get(
-    `SELECT is_me FROM messages WHERE chat_key = ? ORDER BY seq DESC LIMIT 1`,
-    chatKey
+    `SELECT is_me FROM messages WHERE account_id = ? AND chat_key = ? ORDER BY seq DESC LIMIT 1`,
+    accountId, chatKey
   );
   return row ? row.is_me : null;
 }
 
-// Check if there's already a pending outgoing message for this chat_key
-async function hasPendingOutgoing(chatKey) {
+async function hasPendingOutgoing(accountId, chatKey) {
   const db = await getDb();
   const row = await db.get(
-    `SELECT COUNT(*) as cnt
-     FROM outgoing_messages
-     WHERE chat_key = ?
+    `SELECT COUNT(*) as cnt FROM outgoing_messages
+     WHERE account_id = ? AND chat_key = ?
        AND status IN ('pending', 'sending')`,
-    chatKey
+    accountId, chatKey
   );
   return (row?.cnt || 0) > 0;
 }
 
-/**
- * 读取应用设置；如果未设置则返回默认值。
- * @param {string} key - 设置键名。
- * @param {string|null} fallbackValue - 缺省值。
- * @returns {Promise<string|null>} 当前值。
- */
-async function getAppSetting(key, fallbackValue = null) {
-  const db = await getDb();
-  const row = await db.get('SELECT value FROM app_settings WHERE key = ?', key);
-  return row ? row.value : fallbackValue;
-}
-
-/**
- * 写入应用设置，供 UI 与 worker 共享。
- * @param {string} key - 设置键名。
- * @param {string} value - 序列化后的设置值。
- * @returns {Promise<void>}
- */
-async function setAppSetting(key, value) {
-  const db = await getDb();
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES(?, ?, unixepoch())
-     ON CONFLICT(key) DO UPDATE SET
-       value = excluded.value,
-       updated_at = unixepoch()`,
-    key,
-    value
-  );
-}
-
-/**
- * 初始化运行时设置，只在数据库缺省时写入默认值。
- * @param {{autoReplyEnabled: boolean}} defaults - 默认设置集合。
- * @returns {Promise<void>}
- */
-async function ensureRuntimeSettings(defaults = {}) {
-  const db = await getDb();
-  const autoReplyValue = defaults.autoReplyEnabled ? '1' : '0';
-  const crawlerDesiredValue = defaults.crawlerDesiredEnabled === false ? '0' : '1';
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('auto_reply_enabled', ?, unixepoch())
-     ON CONFLICT(key) DO NOTHING`,
-    autoReplyValue
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('crawler_desired_enabled', ?, unixepoch())
-     ON CONFLICT(key) DO NOTHING`,
-    crawlerDesiredValue
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('crawler_reported_enabled', '', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('crawler_last_heartbeat_at', '0', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_last_heartbeat_at', '0', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_page_url', '', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_visible_order_count', '0', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_scan_state', 'idle', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_full_scan_requested_nonce', '', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_full_scan_handled_nonce', '', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_last_sync_at', '0', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('qianniu_last_sync_stats', '{}', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('initial_crawl_session_count', '30', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('initial_crawl_requested_nonce', '', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-  await db.run(
-    `INSERT INTO app_settings(key, value, updated_at)
-     VALUES('initial_crawl_handled_nonce', '', unixepoch())
-     ON CONFLICT(key) DO NOTHING`
-  );
-}
-
-/**
- * 读取当前 AI 自动回复开关。
- * @returns {Promise<boolean>} 是否允许 AI 自动回复。
- */
-async function isAutoReplyEnabled() {
-  const value = await getAppSetting('auto_reply_enabled', '1');
-  return value === '1';
-}
-
-/**
- * 更新当前 AI 自动回复开关。
- * @param {boolean} enabled - 新状态。
- * @returns {Promise<void>}
- */
-async function setAutoReplyEnabled(enabled) {
-  await setAppSetting('auto_reply_enabled', enabled ? '1' : '0');
-}
-
-/**
- * 读取当前期望的巡逻开关状态。
- * @returns {Promise<boolean>} 是否允许后台巡逻。
- */
-async function isCrawlerDesiredEnabled() {
-  const value = await getAppSetting('crawler_desired_enabled', '1');
-  return value === '1';
-}
-
-/**
- * 更新当前期望的巡逻开关状态。
- * @param {boolean} enabled - 新状态。
- * @returns {Promise<void>}
- */
-async function setCrawlerDesiredEnabled(enabled) {
-  await setAppSetting('crawler_desired_enabled', enabled ? '1' : '0');
-}
-
-/**
- * 记录浏览器脚本上报的当前巡逻状态与心跳时间。
- * @param {{crawlerEnabled: boolean}} runtimeState - 浏览器脚本当前状态。
- * @returns {Promise<void>}
- */
-async function updateCrawlerHeartbeat(runtimeState) {
-  await setAppSetting('crawler_reported_enabled', runtimeState.crawlerEnabled ? '1' : '0');
-  await setAppSetting('crawler_last_heartbeat_at', String(Math.floor(Date.now() / 1000)));
-  if (runtimeState.initialCrawlNonceHandled) {
-    await setAppSetting('initial_crawl_handled_nonce', runtimeState.initialCrawlNonceHandled);
-  }
-}
-
-/**
- * 读取 UI 与浏览器脚本共享的运行时设置快照。
- * @returns {Promise<{
- *   autoReplyEnabled: boolean,
- *   crawlerDesiredEnabled: boolean,
- *   crawlerReportedEnabled: boolean | null,
- *   crawlerLastHeartbeatAt: number
- * }>} 当前设置快照。
- */
-async function getRuntimeSettings() {
-  const [
-    autoReplyEnabled, crawlerDesiredEnabled, crawlerReportedValue, crawlerLastHeartbeatValue,
-    initialCrawlSessionCountValue, initialCrawlRequestedNonce, initialCrawlHandledNonce,
-  ] = await Promise.all([
-    isAutoReplyEnabled(),
-    isCrawlerDesiredEnabled(),
-    getAppSetting('crawler_reported_enabled', ''),
-    getAppSetting('crawler_last_heartbeat_at', '0'),
-    getAppSetting('initial_crawl_session_count', '30'),
-    getAppSetting('initial_crawl_requested_nonce', ''),
-    getAppSetting('initial_crawl_handled_nonce', ''),
-  ]);
-
-  return {
-    autoReplyEnabled,
-    crawlerDesiredEnabled,
-    crawlerReportedEnabled:
-      crawlerReportedValue === ''
-        ? null
-        : crawlerReportedValue === '1',
-    crawlerLastHeartbeatAt: Number(crawlerLastHeartbeatValue || 0),
-    initialCrawlSessionCount: Number(initialCrawlSessionCountValue) || 30,
-    initialCrawlNonce:
-      initialCrawlRequestedNonce && initialCrawlRequestedNonce !== initialCrawlHandledNonce
-        ? initialCrawlRequestedNonce
-        : null,
-  };
-}
-
-/**
- * 解析保存在 app_settings 中的 JSON 值；解析失败时返回兜底对象。
- * @param {string | null} value - 原始 JSON 字符串。
- * @param {Record<string, any>} fallback - 兜底值。
- * @returns {Record<string, any>} 解析后的对象。
- */
-function parseSettingsJson(value, fallback = {}) {
-  try {
-    const parsed = JSON.parse(value || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : fallback;
-  } catch (_) {
-    return fallback;
-  }
-}
-
-/**
- * 记录千牛油猴脚本的心跳与扫描状态，并返回当前最新运行态。
- * @param {{
- *   pageUrl?: string,
- *   visibleOrderCount?: number,
- *   scanState?: string,
- *   scanNonceHandled?: string | null,
- *   syncNonceHandled?: string | null
- * }} runtimeState - 千牛脚本上报的运行态。
- * @returns {Promise<ReturnType<typeof getQianniuRuntime>>} 最新千牛运行态。
- */
-async function updateQianniuHeartbeat(runtimeState = {}) {
-  const pageUrl = normalizeOptionalText(runtimeState.pageUrl) || '';
-  const visibleOrderCount = Number.isFinite(Number(runtimeState.visibleOrderCount))
-    ? String(Math.max(0, Number(runtimeState.visibleOrderCount)))
-    : '0';
-  const scanState = runtimeState.scanState === 'scanning' ? 'scanning' : 'idle';
-  const scanNonceHandled = normalizeOptionalText(runtimeState.scanNonceHandled) || '';
-  const syncNonceHandled = normalizeOptionalText(runtimeState.syncNonceHandled) || '';
-
-  await setAppSetting('qianniu_page_url', pageUrl);
-  await setAppSetting('qianniu_visible_order_count', visibleOrderCount);
-  await setAppSetting('qianniu_scan_state', scanState);
-  await setAppSetting('qianniu_last_heartbeat_at', String(Math.floor(Date.now() / 1000)));
-  if (scanNonceHandled) {
-    await setAppSetting('qianniu_full_scan_handled_nonce', scanNonceHandled);
-  }
-  if (syncNonceHandled) {
-    await setAppSetting('qianniu_sync_now_handled_nonce', syncNonceHandled);
-  }
-
-  return getQianniuRuntime();
-}
-
-/**
- * 为千牛脚本生成一次新的当前页立即同步请求。
- * @returns {Promise<{requestedNonce: string, runtime: Awaited<ReturnType<typeof getQianniuRuntime>>}>} 新请求 nonce 与最新运行态。
- */
-async function requestQianniuSyncNow() {
-  const requestedNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await setAppSetting('qianniu_sync_now_requested_nonce', requestedNonce);
-  return {
-    requestedNonce,
-    runtime: await getQianniuRuntime(),
-  };
-}
-
-/**
- * 为千牛脚本生成一次新的手动全量扫描请求。
- * @returns {Promise<{requestedNonce: string, runtime: Awaited<ReturnType<typeof getQianniuRuntime>>}>} 新请求 nonce 与最新运行态。
- */
-async function requestQianniuFullScan() {
-  const requestedNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await setAppSetting('qianniu_full_scan_requested_nonce', requestedNonce);
-  return {
-    requestedNonce,
-    runtime: await getQianniuRuntime(),
-  };
-}
-
-/**
- * 读取千牛订单采集脚本的运行态与最近一次同步统计。
- * @returns {Promise<{
- *   isOnline: boolean,
- *   pageUrl: string,
- *   visibleOrderCount: number,
- *   scanState: 'idle' | 'scanning',
- *   lastHeartbeatAt: number,
- *   lastSyncAt: number,
- *   lastSyncStats: Record<string, any>,
- *   syncNowNonce: string | null,
- *   syncNowRequestedNonce: string | null,
- *   syncNowHandledNonce: string | null,
- *   fullScanNonce: string | null,
- *   fullScanRequestedNonce: string | null,
- *   fullScanHandledNonce: string | null
- * }>} 千牛运行态摘要。
- */
-async function getQianniuRuntime() {
-  const [
-    pageUrl,
-    visibleOrderCount,
-    scanState,
-    lastHeartbeatAt,
-    lastSyncAt,
-    lastSyncStats,
-    syncNowRequestedNonce,
-    syncNowHandledNonce,
-    fullScanRequestedNonce,
-    fullScanHandledNonce,
-  ] = await Promise.all([
-    getAppSetting('qianniu_page_url', ''),
-    getAppSetting('qianniu_visible_order_count', '0'),
-    getAppSetting('qianniu_scan_state', 'idle'),
-    getAppSetting('qianniu_last_heartbeat_at', '0'),
-    getAppSetting('qianniu_last_sync_at', '0'),
-    getAppSetting('qianniu_last_sync_stats', '{}'),
-    getAppSetting('qianniu_sync_now_requested_nonce', ''),
-    getAppSetting('qianniu_sync_now_handled_nonce', ''),
-    getAppSetting('qianniu_full_scan_requested_nonce', ''),
-    getAppSetting('qianniu_full_scan_handled_nonce', ''),
-  ]);
-
-  const heartbeatTs = Number(lastHeartbeatAt || 0);
-  const requestedSyncNowNonce = normalizeOptionalText(syncNowRequestedNonce);
-  const handledSyncNowNonce = normalizeOptionalText(syncNowHandledNonce);
-  const requestedNonce = normalizeOptionalText(fullScanRequestedNonce);
-  const handledNonce = normalizeOptionalText(fullScanHandledNonce);
-
-  return {
-    isOnline: heartbeatTs > 0 && (Math.floor(Date.now() / 1000) - heartbeatTs) <= 12,
-    pageUrl: pageUrl || '',
-    visibleOrderCount: Number(visibleOrderCount || 0),
-    scanState: scanState === 'scanning' ? 'scanning' : 'idle',
-    lastHeartbeatAt: heartbeatTs,
-    lastSyncAt: Number(lastSyncAt || 0),
-    lastSyncStats: parseSettingsJson(lastSyncStats, {}),
-    syncNowNonce:
-      requestedSyncNowNonce && requestedSyncNowNonce !== handledSyncNowNonce
-        ? requestedSyncNowNonce
-        : null,
-    syncNowRequestedNonce: requestedSyncNowNonce,
-    syncNowHandledNonce: handledSyncNowNonce,
-    fullScanNonce: requestedNonce && requestedNonce !== handledNonce ? requestedNonce : null,
-    fullScanRequestedNonce: requestedNonce,
-    fullScanHandledNonce: handledNonce,
-  };
-}
-
-/**
- * 读取初始遍历会话数量。
- * @returns {Promise<number>}
- */
-async function getInitialCrawlSessionCount() {
-  const value = await getAppSetting('initial_crawl_session_count', '30');
-  return Number(value) || 30;
-}
-
-/**
- * 设置初始遍历会话数量。
- * @param {number} n
- * @returns {Promise<void>}
- */
-async function setInitialCrawlSessionCount(n) {
-  await setAppSetting('initial_crawl_session_count', String(Math.max(1, Math.min(100, n))));
-}
-
-/**
- * 生成一个新的初始遍历 nonce，触发油猴脚本执行初始遍历。
- * @returns {Promise<{requestedNonce: string}>}
- */
-async function requestInitialCrawl() {
-  const requestedNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await setAppSetting('initial_crawl_requested_nonce', requestedNonce);
-  return { requestedNonce };
-}
+// ── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
+  // Client management
+  registerClient,
+  getClient,
+  listClients,
+  updateClientLastSeen,
+
+  // Account settings
+  getAccountSetting,
+  setAccountSetting,
+  isAutoReplyEnabled,
+  setAutoReplyEnabled,
+
+  // Client runtime
+  getClientRuntime,
+  setClientRuntime,
+  isCrawlerDesiredEnabled,
+  setCrawlerDesiredEnabled,
+  updateCrawlerHeartbeat,
+  getRuntimeSettings,
+  ensureRuntimeSettings,
+  setInitialCrawlSessionCount,
+
+  // Client commands
+  requestCommand,
+  handleCommandNonce,
+  getPendingCommand,
+  requestInitialCrawl,
+  requestQianniuSyncNow,
+  requestQianniuFullScan,
+
+  // Qianniu runtime
+  updateQianniuHeartbeat,
+  getQianniuRuntime,
+
+  // Core data
   ingest,
   listSessions,
   getSession,
@@ -2082,28 +1973,20 @@ module.exports = {
   ingestOrders,
   listOrders,
   listOrdersByChatKey,
+
+  // Outgoing messages
   addOutgoingMessage,
   listOutgoingMessages,
   updateOutgoingStatus,
   claimOutgoingMessage,
 
+  // Outbox
   getUnprocessedOutbox,
   markOutboxProcessed,
   getLastMessageDirection,
   hasPendingOutgoing,
-  ensureRuntimeSettings,
-  getRuntimeSettings,
-  isAutoReplyEnabled,
-  setAutoReplyEnabled,
-  isCrawlerDesiredEnabled,
-  setCrawlerDesiredEnabled,
-  updateCrawlerHeartbeat,
-  updateQianniuHeartbeat,
-  requestQianniuSyncNow,
-  requestQianniuFullScan,
-  getQianniuRuntime,
-  getInitialCrawlSessionCount,
-  setInitialCrawlSessionCount,
-  requestInitialCrawl,
 
+  // Constants
+  DEFAULT_ACCOUNT_ID,
+  LEGACY_CLIENT_ID,
 };

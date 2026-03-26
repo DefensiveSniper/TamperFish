@@ -1,12 +1,14 @@
 // Session from GET /api/sessions - the API returns sessions with computed fields
 export interface Session {
   chat_key: string;
+  account_id: string;
   customer_name: string;
   product_id: string | null;
   product_json: string; // JSON string
   session_id: string | null;
   session_info_json: string; // JSON string
   buyer_user_id: string | null;
+  last_seen_client_id: string | null;
   created_at: number;
   updated_at: number;
   // Computed by db.listSessions():
@@ -27,6 +29,7 @@ export interface ProductInfo {
 
 export interface Message {
   id: number;
+  account_id: string;
   chat_key: string;
   msg_hash: string;
   seq: number;
@@ -40,6 +43,7 @@ export interface Message {
 
 export interface OutgoingMessage {
   id: number;
+  account_id: string;
   chat_key: string;
   customer_name: string;
   product_id: string | null;
@@ -50,6 +54,8 @@ export interface OutgoingMessage {
   reply_to_external_message_id: string | null;
   reply_to_preview: string | null;
   reply_to_type: 'text' | 'image' | null;
+  target_client_id: string | null;
+  claimed_by_client_id: string | null;
   status: 'pending' | 'sending' | 'sent' | 'failed';
   source: 'manual' | 'ai';
   created_at: number;
@@ -76,6 +82,7 @@ export interface PostOutgoingMessageBody {
 
 export interface Order {
   id: number;
+  account_id: string;
   order_id: string;
   chat_key: string | null;
   buyer_name: string | null;
@@ -103,8 +110,7 @@ export interface AppSettings {
   crawlerReportedEnabled: boolean | null;
   crawlerLastHeartbeatAt: number | null;
   initialCrawlSessionCount: number;
-  initialCrawlRequestedNonce: string | null;
-  initialCrawlHandledNonce: string | null;
+  initialCrawlNonce: string | null;
 }
 
 export interface QianniuRuntime {
@@ -121,11 +127,7 @@ export interface QianniuRuntime {
     unmatched: number;
   } | null;
   syncNowNonce: string | null;
-  syncNowRequestedNonce: string | null;
-  syncNowHandledNonce: string | null;
   fullScanNonce: string | null;
-  fullScanRequestedNonce: string | null;
-  fullScanHandledNonce: string | null;
 }
 
 export interface ChatSnapshot {
@@ -141,4 +143,18 @@ export interface OrderQueryParams {
   q?: string;
   limit?: number;
   chatKey?: string;
+}
+
+// Client info from GET /api/clients
+export interface Client {
+  client_id: string;
+  account_id: string;
+  client_name: string;
+  capabilities_json: string;
+  last_seen_at: number | null;
+  status: 'active' | 'disabled';
+  created_at: number;
+  updated_at: number;
+  isOnline: boolean;
+  lastHeartbeatAt: number;
 }

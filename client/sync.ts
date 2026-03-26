@@ -161,9 +161,18 @@ async function syncOnce() {
 
   const normalizedSessions = restoreSessionsRemoteMediaUrls(sessions);
 
+  const CLIENT_ID = process.env.CLIENT_ID || 'legacy-client-1';
+  const CLIENT_SECRET = process.env.CLIENT_SECRET || '';
+  const ACCOUNT_ID = process.env.ACCOUNT_ID || 'default';
+
   const ingestRes = await fetch(`${SERVER_URL}/api/messages/ingest`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Client-Id': CLIENT_ID,
+      'X-Client-Secret': CLIENT_SECRET,
+      'X-Account-Id': ACCOUNT_ID,
+    },
     body: JSON.stringify({ sessions: normalizedSessions }),
   });
 

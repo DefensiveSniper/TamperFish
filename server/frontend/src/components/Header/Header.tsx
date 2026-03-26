@@ -6,6 +6,7 @@ import AiToggle from './AiToggle';
 import CrawlerToggle from './CrawlerToggle';
 import CrawlerRuntimeBadge from './CrawlerRuntimeBadge';
 import InitialCrawlControls from './InitialCrawlControls';
+import ClientSelector from './ClientSelector';
 import StatsDisplay from './StatsDisplay';
 import './Header.css';
 
@@ -71,6 +72,7 @@ export default function Header({ searchQuery, onSearchChange }: HeaderProps) {
         ⋯
       </button>
       <div className={`header-actions${actionsExpanded ? ' expanded' : ''}`}>
+        <ClientSelector />
         <AiToggle />
         <CrawlerToggle />
         <CrawlerRuntimeBadge />

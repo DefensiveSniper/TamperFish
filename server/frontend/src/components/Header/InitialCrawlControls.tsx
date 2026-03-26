@@ -10,9 +10,8 @@ export default function InitialCrawlControls() {
   const [busy, setBusy] = useState(false);
   const [count, setCount] = useState(appSettings.initialCrawlSessionCount || 30);
 
-  const isCrawling =
-    !!appSettings.initialCrawlRequestedNonce &&
-    appSettings.initialCrawlRequestedNonce !== appSettings.initialCrawlHandledNonce;
+  // initialCrawlNonce is non-null when there's a pending command
+  const isCrawling = !!appSettings.initialCrawlNonce;
 
   const handleTrigger = async () => {
     setBusy(true);
@@ -27,7 +26,7 @@ export default function InitialCrawlControls() {
         settings: {
           ...appSettings,
           initialCrawlSessionCount: count,
-          initialCrawlRequestedNonce: result.requestedNonce,
+          initialCrawlNonce: result.requestedNonce,
         },
       });
       toast(`已请求初始遍历 ${count} 个会话`, 'success');
