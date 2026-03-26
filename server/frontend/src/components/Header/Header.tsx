@@ -54,8 +54,8 @@ export default function Header({ searchQuery, onSearchChange }: HeaderProps) {
   return (
     <header>
       <div className="logo">
-        <div className="logo-icon">鱼</div>
-        <h1>闲鱼聚合</h1>
+        <div className="logo-icon">租</div>
+        <h1>租赁聚合</h1>
       </div>
       <input
         id="search"

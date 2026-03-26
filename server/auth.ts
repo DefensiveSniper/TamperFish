@@ -268,7 +268,7 @@ const LOGIN_PAGE_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 - 闲鱼聚合</title>
+<title>登录 - 租赁聚合</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{min-height:100vh;display:flex;align-items:center;justify-content:center;
@@ -306,7 +306,7 @@ body{min-height:100vh;display:flex;align-items:center;justify-content:center;
 </head>
 <body>
 <div class="box">
-  <div class="logo"><div class="logo-icon">鱼</div><h1>闲鱼聚合</h1></div>
+  <div class="logo"><div class="logo-icon">租</div><h1>租赁聚合</h1></div>
   <div class="err" id="err"></div>
   <div class="f"><label>用户名</label><input id="u" type="text" autocomplete="username" autofocus/></div>
   <div class="f"><label>密码</label><input id="p" type="password" autocomplete="current-password"/></div>
