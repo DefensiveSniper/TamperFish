@@ -68,6 +68,7 @@ Qianniu Batch Consign       │
 ```bash
 cd server && npm ci && cd ..
 cd server/frontend && npm ci && cd ../..
+cd client && npm ci && cd ..
 cd chrome_extension && npm ci && cd ..
 ```
 
