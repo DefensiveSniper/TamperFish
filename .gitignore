@@ -23,19 +23,15 @@ client/*.js
 
 # ── Server Runtime Data ─────────────────────────────────────────────────────────
 server/data.db*
-server/*.log
-server/*.pid
-client/*.log
+**/*.log
+**/*.pid
 server/media-cache/
 
 # ── Frontend Build Output ───────────────────────────────────────────────────────
 server/public/
-server/public/media-cache/
 
 # ── Chrome Extension Build ──────────────────────────────────────────────────────
 chrome_extension/dist/
-chrome_extension/dist/captured/
-chrome_extension/public/captured/
 
 # ── Chrome Profiles / Proxy ─────────────────────────────────────────────────────
 .chrome-xianyu-profile/
@@ -49,4 +45,4 @@ client/.chrome-proxy-extension/
 agent_logs/
 docs/
 /tasks/
-.vscode/
+PRD.md
