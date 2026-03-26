@@ -5,8 +5,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const MEDIA_CACHE_DIR = path.join(__dirname, 'public', 'media-cache');
+const MEDIA_CACHE_DIR = path.join(__dirname, '.browser-media-cache');
 const MEDIA_CACHE_URL_PREFIX = '/media-cache/';
+const MEDIA_CACHE_MANIFEST_PATH = path.join(MEDIA_CACHE_DIR, 'manifest.json');
 
 const CONTENT_TYPE_BY_EXTENSION = {
   '.png': 'image/png',
@@ -29,6 +30,41 @@ function normalizeUrl(value) {
 
 function getCacheHash(url) {
   return crypto.createHash('sha256').update(url).digest('hex').slice(0, 24);
+}
+
+function readMediaCacheManifest() {
+  ensureMediaCacheDir();
+  if (!fs.existsSync(MEDIA_CACHE_MANIFEST_PATH)) {
+    return {};
+  }
+
+  try {
+    const raw = fs.readFileSync(MEDIA_CACHE_MANIFEST_PATH, 'utf8').trim();
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeMediaCacheManifest(manifest) {
+  ensureMediaCacheDir();
+  const tempPath = `${MEDIA_CACHE_MANIFEST_PATH}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(manifest, null, 2));
+  fs.renameSync(tempPath, MEDIA_CACHE_MANIFEST_PATH);
+}
+
+function upsertMediaCacheManifestEntry(hash, entry) {
+  const manifest = readMediaCacheManifest();
+  manifest[hash] = {
+    ...(manifest[hash] || {}),
+    ...entry,
+  };
+  writeMediaCacheManifest(manifest);
 }
 
 function findExistingCachedFile(hash) {
@@ -59,48 +95,11 @@ function resolveExtensionFromContentType(contentType) {
   return '.png';
 }
 
-function extractCachedMediaFileName(url) {
-  const normalizedUrl = normalizeUrl(url);
-  if (!normalizedUrl) {
-    return '';
-  }
-
-  try {
-    const parsedUrl = new URL(normalizedUrl);
-    const normalizedHost = parsedUrl.hostname.toLowerCase();
-    const normalizedPath = parsedUrl.pathname || '';
-    if (!['localhost', '127.0.0.1'].includes(normalizedHost)) {
-      return '';
-    }
-    if (!normalizedPath.startsWith(MEDIA_CACHE_URL_PREFIX)) {
-      return '';
-    }
-
-    const fileName = decodeURIComponent(normalizedPath.slice(MEDIA_CACHE_URL_PREFIX.length));
-    if (!fileName || fileName.includes('..') || fileName.includes('/')) {
-      return '';
-    }
-    return fileName;
-  } catch (_) {
-    return '';
-  }
+function buildCachedMediaUrl(publicOrigin, fileName) {
+  return `${normalizeUrl(publicOrigin).replace(/\/$/, '')}${MEDIA_CACHE_URL_PREFIX}${encodeURIComponent(fileName)}`;
 }
 
-function normalizeLoopbackCachedMediaUrl(url, publicOrigin) {
-  const fileName = extractCachedMediaFileName(url);
-  if (!fileName) {
-    return '';
-  }
-
-  const filePath = path.join(MEDIA_CACHE_DIR, fileName);
-  if (!filePath.startsWith(MEDIA_CACHE_DIR) || !fs.existsSync(filePath)) {
-    return '';
-  }
-
-  return buildCachedMediaUrl(publicOrigin, fileName);
-}
-
-function isCachedMediaUrl(url, publicOrigin) {
+function isCachedMediaUrl(url, publicOrigin = '') {
   const normalizedUrl = normalizeUrl(url);
   const normalizedOrigin = normalizeUrl(publicOrigin).replace(/\/$/, '');
   return !!normalizedUrl
@@ -116,24 +115,22 @@ function shouldCacheRemoteImage(url, publicOrigin) {
   return !isCachedMediaUrl(normalizedUrl, publicOrigin);
 }
 
-function buildCachedMediaUrl(publicOrigin, fileName) {
-  return `${normalizeUrl(publicOrigin).replace(/\/$/, '')}${MEDIA_CACHE_URL_PREFIX}${encodeURIComponent(fileName)}`;
-}
-
 async function cacheRemoteImage(url, { publicOrigin }) {
   const normalizedUrl = normalizeUrl(url);
-  const normalizedLoopbackUrl = normalizeLoopbackCachedMediaUrl(normalizedUrl, publicOrigin);
-  if (normalizedLoopbackUrl) {
-    return normalizedLoopbackUrl;
-  }
-
   if (!shouldCacheRemoteImage(normalizedUrl, publicOrigin)) {
     return normalizedUrl;
   }
 
   const hash = getCacheHash(normalizedUrl);
-  const existingFile = findExistingCachedFile(hash);
+  const manifest = readMediaCacheManifest();
+  const manifestEntry = manifest[hash];
+  const existingFile = manifestEntry?.fileName || findExistingCachedFile(hash);
   if (existingFile) {
+    upsertMediaCacheManifestEntry(hash, {
+      fileName: existingFile,
+      originalUrl: normalizedUrl,
+      updatedAt: Date.now(),
+    });
     return buildCachedMediaUrl(publicOrigin, existingFile);
   }
 
@@ -168,9 +165,15 @@ async function cacheRemoteImage(url, { publicOrigin }) {
       fs.renameSync(tempPath, filePath);
     }
 
+    upsertMediaCacheManifestEntry(hash, {
+      fileName,
+      originalUrl: normalizedUrl,
+      updatedAt: Date.now(),
+    });
+
     return buildCachedMediaUrl(publicOrigin, fileName);
   } catch (error) {
-    console.warn('[media-cache] cache failed:', normalizedUrl, error.message || error);
+    console.warn('[client-media-cache] cache failed:', normalizedUrl, error.message || error);
     return normalizedUrl;
   }
 }
@@ -191,39 +194,52 @@ async function cacheRemoteImages(urls = [], { publicOrigin }) {
   return mappings;
 }
 
-async function localizeMessages(messages = [], { publicOrigin }) {
-  const list = Array.isArray(messages) ? messages : [];
-  const remoteUrls = list
-    .filter((message) => message?.type === 'image' && shouldCacheRemoteImage(message?.content, publicOrigin))
-    .map((message) => message.content);
-
-  if (!remoteUrls.length) {
-    return list;
-  }
-
-  const mappings = await cacheRemoteImages(remoteUrls, { publicOrigin });
-  return list.map((message) => {
-    if (message?.type !== 'image') {
-      return message;
-    }
-
-    const nextContent = mappings[normalizeUrl(message.content)];
-    return nextContent && nextContent !== message.content
-      ? { ...message, content: nextContent }
-      : message;
-  });
+function extractCacheHashFromUrl(url) {
+  const normalizedUrl = normalizeUrl(url);
+  const match = normalizedUrl.match(/\/media-cache\/([a-f0-9]{24})(?:\.[a-z0-9]+)?(?:[?#].*)?$/i);
+  return match ? match[1].toLowerCase() : null;
 }
 
-async function localizeSessions(sessions = {}, { publicOrigin }) {
-  const entries = await Promise.all(
-    Object.entries(sessions || {}).map(async ([chatKey, session]) => {
-      const nextMessages = await localizeMessages(session?.messages || [], { publicOrigin });
-      return [chatKey, {
-        ...session,
-        messages: nextMessages,
-      }];
-    })
-  );
+function resolveManifestOriginalUrl(entry) {
+  if (!entry) {
+    return null;
+  }
+  if (typeof entry === 'string') {
+    return entry;
+  }
+  return normalizeUrl(entry.originalUrl) || null;
+}
+
+function restoreOriginalMediaUrl(url, manifest = readMediaCacheManifest()) {
+  const hash = extractCacheHashFromUrl(url);
+  if (!hash) {
+    return url;
+  }
+
+  const originalUrl = resolveManifestOriginalUrl(manifest[hash]);
+  return originalUrl || url;
+}
+
+function restoreSessionsRemoteMediaUrls(sessions = {}, manifest = readMediaCacheManifest()) {
+  const entries = Object.entries(sessions || {}).map(([chatKey, session]) => {
+    const nextMessages = Array.isArray(session?.messages)
+      ? session.messages.map((message) => {
+          if (message?.type !== 'image') {
+            return message;
+          }
+
+          const restoredUrl = restoreOriginalMediaUrl(message.content, manifest);
+          return restoredUrl === message.content
+            ? message
+            : { ...message, content: restoredUrl };
+        })
+      : session?.messages;
+
+    return [chatKey, {
+      ...session,
+      messages: nextMessages,
+    }];
+  });
 
   return Object.fromEntries(entries);
 }
@@ -259,9 +275,13 @@ function serveCachedMediaRequest(req, res) {
 }
 
 module.exports = {
+  MEDIA_CACHE_DIR,
+  MEDIA_CACHE_MANIFEST_PATH,
   MEDIA_CACHE_URL_PREFIX,
+  buildCachedMediaUrl,
   cacheRemoteImages,
-  localizeMessages,
-  localizeSessions,
+  readMediaCacheManifest,
+  restoreOriginalMediaUrl,
+  restoreSessionsRemoteMediaUrls,
   serveCachedMediaRequest,
 };

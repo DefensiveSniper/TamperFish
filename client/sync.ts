@@ -25,15 +25,16 @@ const SERVER_URL = process.env.SERVER_URL || 'http://127.0.0.1:3210';
 const SYNC_INTERVAL = parseInt(process.env.SYNC_INTERVAL, 10) || 5000;
 
 const { WebSocket } = require('ws');
+const { restoreSessionsRemoteMediaUrls } = require('./media_cache.ts');
 
-let ws: InstanceType<typeof WebSocket> | null = null;
-let wsUrl: string | null = null;
+let ws = null;
+let wsUrl = null;
 let msgId = 0;
-let lastHash: string | null = null;
+let lastHash = null;
 let stopping = false;
 
 // ── Graceful shutdown ──────────────────────────────────────────────
-function shutdown(signal: string) {
+function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   console.log(`[sync] received ${signal}, shutting down...`);
@@ -44,12 +45,12 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 // ── Simple hash for change detection ───────────────────────────────
-function simpleHash(str: string): string {
+function simpleHash(str) {
   return require('crypto').createHash('md5').update(str).digest('hex');
 }
 
 // ── Find goofish IM tab ────────────────────────────────────────────
-async function findTab(): Promise<string> {
+async function findTab() {
   const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
   if (!res.ok) throw new Error(`CDP not available at port ${CDP_PORT}`);
   const tabs = await res.json();
@@ -59,7 +60,7 @@ async function findTab(): Promise<string> {
 }
 
 // ── Ensure WebSocket connection ────────────────────────────────────
-function ensureConnection(url: string): Promise<InstanceType<typeof WebSocket>> {
+function ensureConnection(url) {
   return new Promise((resolve, reject) => {
     if (ws && ws.readyState === WebSocket.OPEN && wsUrl === url) {
       return resolve(ws);
@@ -87,7 +88,7 @@ function ensureConnection(url: string): Promise<InstanceType<typeof WebSocket>> 
 }
 
 // ── Evaluate expression via CDP ────────────────────────────────────
-function evalInTab(expression: string): Promise<string> {
+function evalInTab(expression) {
   return new Promise((resolve, reject) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return reject(new Error('WebSocket not connected'));
@@ -128,7 +129,7 @@ function evalInTab(expression: string): Promise<string> {
 }
 
 // ── Single sync cycle ──────────────────────────────────────────────
-async function syncOnce(): Promise<void> {
+async function syncOnce() {
   // 1. Find tab & connect
   const url = await findTab();
   await ensureConnection(url);
@@ -158,10 +159,12 @@ async function syncOnce(): Promise<void> {
     return;
   }
 
+  const normalizedSessions = restoreSessionsRemoteMediaUrls(sessions);
+
   const ingestRes = await fetch(`${SERVER_URL}/api/messages/ingest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessions }),
+    body: JSON.stringify({ sessions: normalizedSessions }),
   });
 
   if (!ingestRes.ok) {
@@ -175,7 +178,7 @@ async function syncOnce(): Promise<void> {
 }
 
 // ── Main loop ──────────────────────────────────────────────────────
-async function loop(): Promise<void> {
+async function loop() {
   console.log(`[sync] starting daemon — interval ${SYNC_INTERVAL}ms`);
 
   while (!stopping) {

@@ -10,6 +10,7 @@
 server/ai.local.js
 server/.chrome-proxy.local.json
 client/.chrome-proxy.local.json
+client/.browser-media-cache/
 
 # ── Dependencies ────────────────────────────────────────────────────────────────
 node_modules/

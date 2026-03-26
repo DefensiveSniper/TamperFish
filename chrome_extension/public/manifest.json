@@ -6,8 +6,7 @@
   "permissions": ["storage", "scripting", "tabs"],
   "host_permissions": [
     "https://www.goofish.com/*",
-    "wss://localhost:3211/*",
-    "http://localhost:3210/*"
+    "wss://127.0.0.1:3211/*"
   ],
   "content_scripts": [
     {

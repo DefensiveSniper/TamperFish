@@ -9,26 +9,20 @@ loadOptionalEnvFiles([
 ]);
 
 const express = require('express');
-const https = require('https');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
-const { WebSocketServer, WebSocket } = require('ws');
 const db = require('./db.ts');
 const { startAutoReplyWorker } = require('./auto_reply_worker.ts');
 const {
   cacheRemoteImages,
   localizeMessages,
   localizeSessions,
-  serveCachedMediaRequest,
 } = require('./media_cache.ts');
 
 const app = express();
 const PORT = process.env.PORT || 3210;
 const SERVER_BIND_HOST = process.env.SERVER_BIND_HOST || '0.0.0.0';
-const DEFAULT_BROWSER_WSS_PORT = Number(process.env.BROWSER_WSS_PORT || (Number(PORT) + 1));
-const DEFAULT_BROWSER_WSS_PATH = process.env.BROWSER_WSS_PATH || '/ws/browser';
-const DEFAULT_BROWSER_WSS_CERT_DIR = path.join(__dirname, '.localhost-wss');
-const BROWSER_MEDIA_ORIGIN_EXPLICIT = process.env.BROWSER_MEDIA_ORIGIN || '';
+const PUBLIC_MEDIA_ORIGIN_EXPLICIT = process.env.SERVER_PUBLIC_ORIGIN || process.env.BROWSER_MEDIA_ORIGIN || '';
 
 /**
  * 获取媒体缓存资源的公开访问源。
@@ -36,19 +30,18 @@ const BROWSER_MEDIA_ORIGIN_EXPLICIT = process.env.BROWSER_MEDIA_ORIGIN || '';
  * 都不可用时回退到 localhost。
  */
 function getMediaOrigin(req) {
-  if (BROWSER_MEDIA_ORIGIN_EXPLICIT) return BROWSER_MEDIA_ORIGIN_EXPLICIT;
+  if (PUBLIC_MEDIA_ORIGIN_EXPLICIT) return PUBLIC_MEDIA_ORIGIN_EXPLICIT;
   if (req && req.headers && req.headers.host) {
-    return `https://${req.headers.host.replace(/:\d+$/, '')}:${DEFAULT_BROWSER_WSS_PORT}`;
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const protocol = forwardedProto || req.protocol || 'http';
+    return `${protocol}://${req.headers.host}`;
   }
-  return `https://localhost:${DEFAULT_BROWSER_WSS_PORT}`;
+  return `http://localhost:${PORT}`;
 }
 
 app.use(express.json({ limit: '10mb' }));
 
-// CORS for in-page fetch from https://www.goofish.com to http://127.0.0.1:3210
-// Needed because history-sync runs inside goofish.com origin.
 const CORS_BUILTIN_PATTERNS = [
-  /^https:\/\/www\.goofish\.com$/i,
   /^https?:\/\/127\.0\.0\.1(?::\d+)?$/i,
   /^https?:\/\/localhost(?::\d+)?$/i,
 ];
@@ -64,11 +57,9 @@ app.use((req, res, next) => {
   if (allow) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  // Chrome Private Network Access (PNA)
-  res.setHeader('Access-Control-Allow-Private-Network', 'true');
 
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
@@ -239,17 +230,42 @@ app.post('/api/orders/sync-now', async (_req, res) => {
 // ── POST /api/browser/heartbeat ──────────────────────────────────────────────
 
 app.post('/api/browser/heartbeat', async (req, res) => {
-  const { crawlerEnabled } = req.body || {};
+  const { crawlerEnabled, initialCrawlNonceHandled = null } = req.body || {};
   if (typeof crawlerEnabled !== 'boolean') {
     return res.status(400).json({ error: 'crawlerEnabled must be boolean' });
   }
 
   try {
-    await db.updateCrawlerHeartbeat({ crawlerEnabled });
+    await db.updateCrawlerHeartbeat({ crawlerEnabled, initialCrawlNonceHandled });
     res.json({
       ok: true,
       ...(await db.getRuntimeSettings()),
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/orders/heartbeat ──────────────────────────────────────────────
+
+app.post('/api/orders/heartbeat', async (req, res) => {
+  try {
+    res.json(await db.updateQianniuHeartbeat(req.body || {}));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/orders/ingest ─────────────────────────────────────────────────
+
+app.post('/api/orders/ingest', async (req, res) => {
+  const { orders, pageContext = {} } = req.body || {};
+  if (!Array.isArray(orders)) {
+    return res.status(400).json({ error: 'orders must be an array' });
+  }
+
+  try {
+    res.json(await db.ingestOrders(orders, pageContext));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -381,280 +397,6 @@ app.get('*', (_req, res) => {
 });
 
 /**
- * 确保浏览器脚本使用的 localhost 自签证书存在。
- * 优先使用环境变量显式指定的证书；未指定时，尝试通过 openssl 自动生成一套仅用于本地开发的证书。
- * @returns {{ key: Buffer, cert: Buffer, keyPath: string, certPath: string, generated: boolean }} TLS 材料与来源信息。
- */
-function ensureBrowserWssTlsMaterial() {
-  const certPath = process.env.BROWSER_WSS_CERT_PATH || path.join(DEFAULT_BROWSER_WSS_CERT_DIR, 'localhost.crt');
-  const keyPath = process.env.BROWSER_WSS_KEY_PATH || path.join(DEFAULT_BROWSER_WSS_CERT_DIR, 'localhost.key');
-  const certExists = fs.existsSync(certPath);
-  const keyExists = fs.existsSync(keyPath);
-  let generated = false;
-
-  if (!certExists || !keyExists) {
-    fs.mkdirSync(path.dirname(certPath), { recursive: true });
-    fs.mkdirSync(path.dirname(keyPath), { recursive: true });
-
-    const extraSan = (process.env.BROWSER_WSS_CERT_SAN || '').trim();
-    const baseSan = 'DNS:localhost,IP:127.0.0.1';
-    const fullSan = extraSan ? `${baseSan},${extraSan}` : baseSan;
-
-    const opensslArgs = [
-      'req',
-      '-x509',
-      '-newkey', 'rsa:2048',
-      '-sha256',
-      '-nodes',
-      '-keyout', keyPath,
-      '-out', certPath,
-      '-days', '3650',
-      '-subj', '/CN=localhost',
-      '-addext', `subjectAltName=${fullSan}`,
-    ];
-
-    let result;
-    try {
-      result = spawnSync('openssl', opensslArgs, {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (error) {
-      throw new Error(
-        `无法生成 localhost WSS 证书：${error.message}。`
-        + ' 请安装 openssl，或通过 BROWSER_WSS_CERT_PATH / BROWSER_WSS_KEY_PATH 提供证书。'
-      );
-    }
-
-    if (result.status !== 0) {
-      throw new Error(
-        `openssl 生成 localhost WSS 证书失败：${(result.stderr || result.stdout || '').trim() || 'unknown error'}`
-      );
-    }
-    generated = true;
-  }
-
-  return {
-    key: fs.readFileSync(keyPath),
-    cert: fs.readFileSync(certPath),
-    keyPath,
-    certPath,
-    generated,
-  };
-}
-
-/**
- * 统一处理浏览器脚本通过 WSS 发起的 RPC 请求，复用现有数据库能力，避免油猴侧继续轮询 HTTP。
- * @param {string} action - RPC 动作名。
- * @param {Record<string, any>} payload - RPC 负载。
- * @returns {Promise<any>} RPC 响应数据。
- */
-async function handleBrowserRpcAction(action, payload = {}) {
-  switch (action) {
-    case 'settings.patch': {
-      const { autoReplyEnabled, crawlerDesiredEnabled } = payload;
-      if (typeof autoReplyEnabled !== 'boolean' && typeof crawlerDesiredEnabled !== 'boolean') {
-        throw new Error('at least one boolean setting is required');
-      }
-
-      if (typeof autoReplyEnabled === 'boolean') {
-        await db.setAutoReplyEnabled(autoReplyEnabled);
-      }
-      if (typeof crawlerDesiredEnabled === 'boolean') {
-        await db.setCrawlerDesiredEnabled(crawlerDesiredEnabled);
-      }
-      return await db.getRuntimeSettings();
-    }
-
-    case 'browser.heartbeat': {
-      const { crawlerEnabled, initialCrawlNonceHandled } = payload;
-      if (typeof crawlerEnabled !== 'boolean') {
-        throw new Error('crawlerEnabled must be boolean');
-      }
-
-      await db.updateCrawlerHeartbeat({ crawlerEnabled, initialCrawlNonceHandled });
-      return await db.getRuntimeSettings();
-    }
-
-    case 'orders.heartbeat': {
-      const {
-        pageUrl = '',
-        visibleOrderCount = 0,
-        scanState = 'idle',
-        scanNonceHandled = null,
-        syncNonceHandled = null,
-      } = payload || {};
-      const runtime = await db.updateQianniuHeartbeat({
-        pageUrl,
-        visibleOrderCount,
-        scanState,
-        scanNonceHandled,
-        syncNonceHandled,
-      });
-      return {
-        syncNowNonce: runtime.syncNowNonce,
-        fullScanNonce: runtime.fullScanNonce,
-        runtime,
-      };
-    }
-
-    case 'orders.ingest': {
-      const { orders, pageContext = {} } = payload || {};
-      if (!Array.isArray(orders)) {
-        throw new Error('orders must be an array');
-      }
-      return await db.ingestOrders(orders, pageContext);
-    }
-
-    case 'outgoing.claim':
-      return { message: await db.claimOutgoingMessage() };
-
-    case 'media.cache': {
-      const urlList = Array.isArray(payload.urls)
-        ? payload.urls
-        : (payload.url ? [payload.url] : []);
-      if (!urlList.length) {
-        throw new Error('url or urls is required');
-      }
-
-      const urls = await cacheRemoteImages(urlList, {
-        publicOrigin: getMediaOrigin(null),
-      });
-
-      return {
-        url: payload.url ? (urls[payload.url] || payload.url) : null,
-        urls,
-      };
-    }
-
-    case 'outgoing.patch': {
-      const id = Number(payload.id);
-      const { status, error } = payload;
-      if (!Number.isInteger(id) || id <= 0) {
-        throw new Error('id must be a positive integer');
-      }
-      if (!['sent', 'failed'].includes(status)) {
-        throw new Error('status must be sent or failed');
-      }
-
-      await db.updateOutgoingStatus(id, status, error || null);
-      return { ok: true };
-    }
-
-    default:
-      throw new Error(`unsupported action: ${action}`);
-  }
-}
-
-/**
- * 向浏览器脚本返回统一的 WSS RPC 响应格式。
- * @param {import('ws')} socket - 当前连接。
- * @param {string | number | null} id - 请求 ID。
- * @param {{ ok: boolean, payload?: any, error?: string }} message - 响应内容。
- */
-function sendBrowserRpcResponse(socket, id, message) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-
-  socket.send(JSON.stringify({
-    type: 'rpc-response',
-    id,
-    ...message,
-  }));
-}
-
-/**
- * 启动供油猴脚本使用的 localhost WSS 服务。
- * 该服务只承担浏览器脚本和本地 Node 服务之间的轻量 RPC，不替代现有 3210 HTTP UI。
- * @returns {{ httpsServer: import('https').Server, wss: WebSocketServer, port: number, path: string }} WSS 服务句柄。
- */
-function startBrowserWssServer() {
-  const tlsMaterial = ensureBrowserWssTlsMaterial();
-  const port = DEFAULT_BROWSER_WSS_PORT;
-  const wssPath = DEFAULT_BROWSER_WSS_PATH;
-
-  const httpsServer = https.createServer(
-    {
-      key: tlsMaterial.key,
-      cert: tlsMaterial.cert,
-    },
-    (req, res) => {
-      if (serveCachedMediaRequest(req, res)) {
-        return;
-      }
-
-      if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({
-          ok: true,
-          wssPath,
-        }));
-        return;
-      }
-
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('Not Found');
-    }
-  );
-
-  const wss = new WebSocketServer({
-    server: httpsServer,
-    path: wssPath,
-    perMessageDeflate: false,
-  });
-
-  wss.on('connection', (socket) => {
-    socket.on('message', async (rawMessage) => {
-      let message;
-      try {
-        message = JSON.parse(rawMessage.toString());
-      } catch (_) {
-        sendBrowserRpcResponse(socket, null, {
-          ok: false,
-          error: 'invalid json payload',
-        });
-        return;
-      }
-
-      const requestId = message?.id ?? null;
-      const action = message?.action;
-      if (!action) {
-        sendBrowserRpcResponse(socket, requestId, {
-          ok: false,
-          error: 'action is required',
-        });
-        return;
-      }
-
-      try {
-        const payload = await handleBrowserRpcAction(action, message?.payload || {});
-        sendBrowserRpcResponse(socket, requestId, {
-          ok: true,
-          payload,
-        });
-      } catch (error) {
-        sendBrowserRpcResponse(socket, requestId, {
-          ok: false,
-          error: error.message || String(error),
-        });
-      }
-    });
-  });
-
-  httpsServer.listen(port, SERVER_BIND_HOST, () => {
-    console.log(`[browser-wss] wss://${SERVER_BIND_HOST}:${port}${wssPath}`);
-    console.log(`[browser-wss] health https://${SERVER_BIND_HOST}:${port}/health`);
-    if (tlsMaterial.generated) {
-      console.log(`[browser-wss] generated localhost cert: ${tlsMaterial.certPath}`);
-      console.log(`[browser-wss] generated localhost key: ${tlsMaterial.keyPath}`);
-    }
-  });
-
-  return { httpsServer, wss, port, path: wssPath };
-}
-
-/**
  * 初始化服务启动时需要的运行时设置，避免 UI 开关缺省态不确定。
  * @returns {Promise<void>}
  */
@@ -692,7 +434,6 @@ function ensureFrontendBuilt() {
 async function startServer() {
   ensureFrontendBuilt();
   await bootstrapSettings();
-  startBrowserWssServer();
 
   app.listen(PORT, SERVER_BIND_HOST, () => {
     console.log(`[server] http://${SERVER_BIND_HOST}:${PORT}`);

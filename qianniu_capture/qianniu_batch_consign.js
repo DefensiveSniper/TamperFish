@@ -14,7 +14,7 @@
     'use strict';
     const SCRIPT_VERSION = '1.5';
     const CONFIG = {
-        apiWebSocketUrl: 'wss://localhost:3211/ws/browser',
+        apiWebSocketUrl: 'wss://127.0.0.1:3211/ws/browser',
         apiRequestTimeoutMs: 10000,
         apiReconnectDelayMs: 1500,
         heartbeatIntervalMs: 3000,

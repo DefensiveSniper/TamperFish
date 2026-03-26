@@ -71,7 +71,7 @@ export const CONFIG: Config = {
     /** localStorage 存储键名 */
     storageKey: 'xm_chat_history',
     /** 本地 WSS 端点 URL */
-    apiWebSocketUrl: 'wss://localhost:3211/ws/browser',
+    apiWebSocketUrl: 'wss://127.0.0.1:3211/ws/browser',
     /** RPC 请求超时（毫秒） */
     apiRequestTimeoutMs: 10000,
     /** WSS 重连延迟（毫秒） */

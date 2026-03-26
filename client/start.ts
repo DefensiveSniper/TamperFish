@@ -2,10 +2,14 @@
 'use strict';
 
 const fs = require('fs');
+const https = require('https');
 const net = require('net');
 const path = require('path');
-const { spawn } = require('child_process');
-const { WebSocket } = require('ws');
+const { spawn, spawnSync } = require('child_process');
+const { WebSocketServer, WebSocket } = require('ws');
+const { buildServerApiRequest } = require('./browser_bridge_actions.ts');
+const { buildChromeTlsArgs, computeCertificateSpkiHash } = require('./chrome_tls.ts');
+const { cacheRemoteImages, serveCachedMediaRequest } = require('./media_cache.ts');
 const { loadOptionalEnvFiles } = require('../load_env.ts');
 
 loadOptionalEnvFiles([
@@ -29,7 +33,10 @@ const DEFAULT_CHROME_CLEAR_TRANSIENT_DATA_ON_START = true;
 const DEFAULT_CHROME_START_TIMEOUT_MS = 15000;
 const DEFAULT_CHROME_REPAIR_TAMPERMONKEY_WEBREQUEST_ON_START = true;
 const DEFAULT_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD = 4096;
+const DEFAULT_BROWSER_BRIDGE_HOST = '127.0.0.1';
 const DEFAULT_BROWSER_WSS_PORT = 3211;
+const DEFAULT_BROWSER_WSS_PATH = '/ws/browser';
+const DEFAULT_BROWSER_WSS_CERT_DIR = path.join(__dirname, '.localhost-wss');
 const CHROME_SINGLETON_ARTIFACTS = [
   'SingletonLock',
   'SingletonCookie',
@@ -88,7 +95,8 @@ interface ClientConfig {
   chromeStartTimeoutMs: number;
   chromeRepairTampermonkeyWebRequestOnStart: boolean;
   tampermonkeyWebRequestEventThreshold: number;
-  serverHost: string;
+  serverUrl: string;
+  browserBridgeHost: string;
   browserWssPort: number;
 }
 
@@ -122,6 +130,8 @@ let shuttingDown = false;
 let runtimeLogStream: NodeJS.WritableStream | null = null;
 let chromeWatchTimer: ReturnType<typeof setInterval> | null = null;
 let chromeEnsuring = false;
+let browserBridgeHandle: { httpsServer: any; wss: any } | null = null;
+let browserBridgeTlsSpkiHash = '';
 
 // ── 基础设施 ──────────────────────────────────────────────────────
 
@@ -778,7 +788,7 @@ async function launchChromeAttempt(config: ClientConfig) {
   const launchArgs = [
     ...launchBase.baseArgs,
     '--no-first-run',
-    '--allow-insecure-localhost',
+    ...buildChromeTlsArgs(browserBridgeTlsSpkiHash),
     ...(canRestore ? ['--restore-last-session'] : []),
     ...proxyArgs.args,
     ...(proxyArgs.extensionDirs.length > 0 ? [`--load-extension=${proxyArgs.extensionDirs.join(',')}`] : []),
@@ -852,82 +862,214 @@ function startChromeWatchdog(config: ClientConfig) {
   }, config.chromeMonitorIntervalMs);
 }
 
-// ── CDP WSS 地址注入 ─────────────────────────────────────────────
+// ── 本地 Browser Bridge ──────────────────────────────────────────
 
-/**
- * 通过 CDP 在指定 tab 中执行 JS 表达式。
- */
-function cdpEval(wsDebuggerUrl: string, expression: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsDebuggerUrl);
-    let done = false;
-    const timer = setTimeout(() => {
-      if (!done) {
-        done = true;
-        try { ws.close(); } catch (_) { }
-        reject(new Error('CDP eval timeout'));
-      }
-    }, 5000);
-
-    ws.on('open', () => {
-      ws.send(JSON.stringify({
-        id: 1,
-        method: 'Runtime.evaluate',
-        params: { expression, returnByValue: true, awaitPromise: false },
-      }));
-    });
-
-    ws.on('message', (data) => {
-      if (done) return;
-      const msg = JSON.parse(data.toString());
-      if (msg.id === 1) {
-        done = true;
-        clearTimeout(timer);
-        ws.close();
-        resolve();
-      }
-    });
-
-    ws.on('error', (err) => {
-      if (!done) {
-        done = true;
-        clearTimeout(timer);
-        reject(err);
-      }
-    });
-  });
+function buildLocalBrowserOrigin(config: ClientConfig): string {
+  return `https://${config.browserBridgeHost}:${config.browserWssPort}`;
 }
 
-/**
- * 通过 CDP 向匹配 URL 片段的 tab 注入 JS 表达式。
- */
-async function injectToTab(cdpPort: number, urlFragment: string, expression: string): Promise<void> {
+function ensureBrowserBridgeTlsMaterial() {
+  const certPath = process.env.BROWSER_WSS_CERT_PATH || path.join(DEFAULT_BROWSER_WSS_CERT_DIR, 'localhost.crt');
+  const keyPath = process.env.BROWSER_WSS_KEY_PATH || path.join(DEFAULT_BROWSER_WSS_CERT_DIR, 'localhost.key');
+  const certExists = fs.existsSync(certPath);
+  const keyExists = fs.existsSync(keyPath);
+  let generated = false;
+
+  if (!certExists || !keyExists) {
+    fs.mkdirSync(path.dirname(certPath), { recursive: true });
+    fs.mkdirSync(path.dirname(keyPath), { recursive: true });
+
+    const extraSan = (process.env.BROWSER_WSS_CERT_SAN || '').trim();
+    const baseSan = 'DNS:localhost,IP:127.0.0.1';
+    const fullSan = extraSan ? `${baseSan},${extraSan}` : baseSan;
+
+    const opensslArgs = [
+      'req',
+      '-x509',
+      '-newkey', 'rsa:2048',
+      '-sha256',
+      '-nodes',
+      '-keyout', keyPath,
+      '-out', certPath,
+      '-days', '3650',
+      '-subj', '/CN=localhost',
+      '-addext', `subjectAltName=${fullSan}`,
+    ];
+
+    const result = spawnSync('openssl', opensslArgs, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    if (result.status !== 0) {
+      throw new Error(
+        `openssl 生成 localhost bridge 证书失败：${(result.stderr || result.stdout || '').trim() || 'unknown error'}`
+      );
+    }
+    generated = true;
+  }
+
+  return {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+    keyPath,
+    certPath,
+    generated,
+  };
+}
+
+function sendBrowserRpcResponse(socket: any, id: string | number | null, message: Record<string, any>) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  socket.send(JSON.stringify({
+    type: 'rpc-response',
+    id,
+    ...message,
+  }));
+}
+
+function stripOkEnvelope(payload: any) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.ok !== true) {
+    return payload;
+  }
+
+  const { ok, ...rest } = payload;
+  return rest;
+}
+
+async function readJsonResponse(response: any) {
+  const text = await response.text();
+  if (!text) {
+    return {};
+  }
+
   try {
-    const res = await fetch(`http://127.0.0.1:${cdpPort}/json`);
-    if (!res.ok) return;
-    const tabs = await res.json();
-    const tab = tabs.find(t => t.url && t.url.includes(urlFragment) && t.type === 'page');
-    if (!tab) return;
-    const wsUrl = tab.webSocketDebuggerUrl || `ws://127.0.0.1:${cdpPort}/devtools/page/${tab.id}`;
-    await cdpEval(wsUrl, expression);
+    return JSON.parse(text);
   } catch (_) {
-    // 注入失败不影响启动，Tampermonkey 脚本的自动重连会在下次读取到正确地址
+    return { raw: text };
   }
 }
 
-/**
- * 如果设置了 SERVER_HOST，通过 CDP 向目标页面注入远程 WSS 地址到 localStorage。
- */
-async function injectWssConfig(config: ClientConfig): Promise<void> {
-  if (!config.serverHost) return;
+async function forwardBrowserActionToServer(config: ClientConfig, action: string, payload: Record<string, any> = {}) {
+  const request = buildServerApiRequest(action, payload);
+  if (!request) {
+    throw new Error(`action is local-only: ${action}`);
+  }
 
-  const wssUrl = `wss://${config.serverHost}:${config.browserWssPort}/ws/browser`;
-  log(`注入远程 WSS 地址: ${wssUrl}`);
+  const response = await fetch(`${config.serverUrl}${request.path}`, {
+    method: request.method,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: request.method === 'GET' ? undefined : JSON.stringify(request.body || {}),
+  });
+  const responsePayload = await readJsonResponse(response);
 
-  await injectToTab(config.cdpPort, 'goofish.com/im',
-    `localStorage.setItem('xm_server_wss_url', ${JSON.stringify(wssUrl)})`);
-  await injectToTab(config.cdpPort, 'myseller.taobao.com',
-    `localStorage.setItem('xm_server_wss_url', ${JSON.stringify(wssUrl)})`);
+  if (!response.ok) {
+    throw new Error(responsePayload?.error || `server http ${response.status}`);
+  }
+
+  if (action === 'settings.patch' || action === 'browser.heartbeat') {
+    return stripOkEnvelope(responsePayload);
+  }
+  return responsePayload;
+}
+
+async function handleBrowserRpcAction(config: ClientConfig, action: string, payload: Record<string, any> = {}) {
+  if (action === 'media.cache') {
+    const urlList = Array.isArray(payload.urls)
+      ? payload.urls
+      : (payload.url ? [payload.url] : []);
+    if (!urlList.length) {
+      throw new Error('url or urls is required');
+    }
+
+    const urls = await cacheRemoteImages(urlList, {
+      publicOrigin: buildLocalBrowserOrigin(config),
+    });
+
+    return {
+      url: payload.url ? (urls[payload.url] || payload.url) : null,
+      urls,
+    };
+  }
+
+  return await forwardBrowserActionToServer(config, action, payload);
+}
+
+function startBrowserBridgeServer(config: ClientConfig) {
+  const tlsMaterial = ensureBrowserBridgeTlsMaterial();
+  browserBridgeTlsSpkiHash = computeCertificateSpkiHash(tlsMaterial.certPath);
+  const httpsServer = https.createServer(
+    {
+      key: tlsMaterial.key,
+      cert: tlsMaterial.cert,
+    },
+    (req, res) => {
+      if (serveCachedMediaRequest(req, res)) {
+        return;
+      }
+
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, wssPath: DEFAULT_BROWSER_WSS_PATH }));
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Not Found');
+    }
+  );
+
+  const wss = new WebSocketServer({
+    server: httpsServer,
+    path: DEFAULT_BROWSER_WSS_PATH,
+    perMessageDeflate: false,
+  });
+
+  wss.on('connection', (socket) => {
+    socket.on('message', async (rawMessage) => {
+      let message;
+      try {
+        message = JSON.parse(rawMessage.toString());
+      } catch (_) {
+        sendBrowserRpcResponse(socket, null, { ok: false, error: 'invalid json payload' });
+        return;
+      }
+
+      const requestId = message?.id ?? null;
+      const action = message?.action;
+      if (!action) {
+        sendBrowserRpcResponse(socket, requestId, { ok: false, error: 'action is required' });
+        return;
+      }
+
+      try {
+        const responsePayload = await handleBrowserRpcAction(config, action, message?.payload || {});
+        sendBrowserRpcResponse(socket, requestId, { ok: true, payload: responsePayload });
+      } catch (error) {
+        sendBrowserRpcResponse(socket, requestId, {
+          ok: false,
+          error: error.message || String(error),
+        });
+      }
+    });
+  });
+
+  httpsServer.listen(config.browserWssPort, config.browserBridgeHost, () => {
+    log(`本地 browser bridge 已启动: ${buildLocalBrowserOrigin(config)}${DEFAULT_BROWSER_WSS_PATH}`);
+    if (tlsMaterial.generated) {
+      log(`生成本地 bridge 证书: ${tlsMaterial.certPath}`);
+      log(`生成本地 bridge 私钥: ${tlsMaterial.keyPath}`);
+    }
+    if (browserBridgeTlsSpkiHash) {
+      log('已为项目专用 Chrome 注入本地 bridge 证书 SPKI allowlist');
+    }
+  });
+
+  return { httpsServer, wss };
 }
 
 // ── 退出处理 ──────────────────────────────────────────────────────
@@ -940,6 +1082,16 @@ function shutdown(signal: string) {
   if (chromeWatchTimer) {
     clearInterval(chromeWatchTimer);
     chromeWatchTimer = null;
+  }
+
+  if (browserBridgeHandle) {
+    try {
+      browserBridgeHandle.wss.close();
+      browserBridgeHandle.httpsServer.close();
+    } catch (_) {
+      // 忽略关闭 browser bridge 时的异常
+    }
+    browserBridgeHandle = null;
   }
 
   for (const child of children) {
@@ -1017,7 +1169,8 @@ async function main(): Promise<void> {
       Number.isFinite(rawTampermonkeyThreshold) && rawTampermonkeyThreshold > 0
         ? rawTampermonkeyThreshold
         : DEFAULT_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD,
-    serverHost: process.env.SERVER_HOST || '',
+    serverUrl,
+    browserBridgeHost: process.env.BROWSER_BIND_HOST || DEFAULT_BROWSER_BRIDGE_HOST,
     browserWssPort: Number(process.env.BROWSER_WSS_PORT || DEFAULT_BROWSER_WSS_PORT),
   };
 
@@ -1029,8 +1182,8 @@ async function main(): Promise<void> {
     log('已通过 CHROME_PROXY_DISABLED=1 禁用项目 Chrome 代理');
   }
 
+  browserBridgeHandle = startBrowserBridgeServer(config);
   await ensureChromeDebugging(config);
-  await injectWssConfig(config);
   startChromeWatchdog(config);
 
   log(`启动 sync.ts，连接 CDP ${config.cdpPort}，同步到 ${serverUrl}`);
