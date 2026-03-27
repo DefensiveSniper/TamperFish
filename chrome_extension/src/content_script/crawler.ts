@@ -515,6 +515,7 @@ export async function extractData(
             !customerName
             || customerName === '消息'
             || customerName === 'Unknown'
+            || /^\d+$/.test(customerName)   // 纯数字 = 未读 badge 误取，跳过
         ) {
             customerName = readCurrentConversationName();
         }
