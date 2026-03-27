@@ -10,3 +10,7 @@ export function getSessionMessages(
 ): Promise<{ session: Session; messages: Message[] }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(chatKey)}/messages`);
 }
+
+export function postMarkSessionRead(chatKey: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(chatKey)}/read`, { method: 'POST' });
+}

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, type ReactNode } from 'react';
-import type { Session, AppSettings, QianniuRuntime, Order, ChatSnapshot } from '../types/api';
+import type { Session, AppSettings, QianniuRuntime, Order, ChatSnapshot, Client } from '../types/api';
 
 export interface AppState {
   sessions: Session[];
@@ -12,6 +12,10 @@ export interface AppState {
   ordersSearch: string;
   isOrdersDrawerOpen: boolean;
   toast: { message: string; type: 'success' | 'error' | '' } | null;
+  // Multi-client state
+  clients: Client[];
+  activeClientId: string;
+  activeAccountId: string;
 }
 
 const defaultSettings: AppSettings = {
@@ -20,8 +24,7 @@ const defaultSettings: AppSettings = {
   crawlerReportedEnabled: null,
   crawlerLastHeartbeatAt: null,
   initialCrawlSessionCount: 20,
-  initialCrawlRequestedNonce: null,
-  initialCrawlHandledNonce: null,
+  initialCrawlNonce: null,
 };
 
 const defaultRuntime: QianniuRuntime = {
@@ -33,11 +36,7 @@ const defaultRuntime: QianniuRuntime = {
   lastSyncAt: null,
   lastSyncStats: null,
   syncNowNonce: null,
-  syncNowRequestedNonce: null,
-  syncNowHandledNonce: null,
   fullScanNonce: null,
-  fullScanRequestedNonce: null,
-  fullScanHandledNonce: null,
 };
 
 const initialState: AppState = {
@@ -51,6 +50,9 @@ const initialState: AppState = {
   ordersSearch: '',
   isOrdersDrawerOpen: false,
   toast: null,
+  clients: [],
+  activeClientId: 'legacy-client-1',
+  activeAccountId: 'default',
 };
 
 type Action =
@@ -64,7 +66,10 @@ type Action =
   | { type: 'SET_ORDERS_SEARCH'; search: string }
   | { type: 'TOGGLE_ORDERS_DRAWER'; open?: boolean }
   | { type: 'SHOW_TOAST'; message: string; toastType: 'success' | 'error' | '' }
-  | { type: 'CLEAR_TOAST' };
+  | { type: 'CLEAR_TOAST' }
+  | { type: 'SET_CLIENTS'; clients: Client[] }
+  | { type: 'SET_ACTIVE_CLIENT'; clientId: string }
+  | { type: 'SET_ACTIVE_ACCOUNT'; accountId: string };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -90,6 +95,19 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, toast: { message: action.message, type: action.toastType } };
     case 'CLEAR_TOAST':
       return { ...state, toast: null };
+    case 'SET_CLIENTS': {
+      const ids = action.clients.map((c) => c.client_id);
+      const needFix = ids.length > 0 && !ids.includes(state.activeClientId);
+      return {
+        ...state,
+        clients: action.clients,
+        ...(needFix ? { activeClientId: ids[0] } : {}),
+      };
+    }
+    case 'SET_ACTIVE_CLIENT':
+      return { ...state, activeClientId: action.clientId };
+    case 'SET_ACTIVE_ACCOUNT':
+      return { ...state, activeAccountId: action.accountId };
     default:
       return state;
   }

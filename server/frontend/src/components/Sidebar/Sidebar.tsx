@@ -1,4 +1,5 @@
 import { useAppState, useAppDispatch } from '../../context/AppContext';
+import { postMarkSessionRead } from '../../services/sessionsApi';
 import SidebarItem from './SidebarItem';
 import './Sidebar.css';
 
@@ -24,6 +25,7 @@ export default function Sidebar({ searchQuery }: SidebarProps) {
 
   const handleClick = (chatKey: string) => {
     dispatch({ type: 'SET_ACTIVE_KEY', key: chatKey });
+    postMarkSessionRead(chatKey).catch(() => {});
   };
 
   return (

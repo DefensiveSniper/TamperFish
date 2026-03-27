@@ -98,6 +98,10 @@ interface ClientConfig {
   serverUrl: string;
   browserBridgeHost: string;
   browserWssPort: number;
+  clientId: string;
+  clientSecret: string;
+  accountId: string;
+  clientName: string;
 }
 
 interface ChromeProfile {
@@ -962,6 +966,9 @@ async function forwardBrowserActionToServer(config: ClientConfig, action: string
     method: request.method,
     headers: {
       'Content-Type': 'application/json',
+      'X-Client-Id': config.clientId,
+      'X-Client-Secret': config.clientSecret,
+      'X-Account-Id': config.accountId,
     },
     body: request.method === 'GET' ? undefined : JSON.stringify(request.body || {}),
   });
@@ -1122,6 +1129,10 @@ async function main(): Promise<void> {
   const chromeClearTransientDataEnv = process.env.CHROME_CLEAR_TRANSIENT_DATA_ON_START;
   const rawTampermonkeyThreshold = Number(process.env.CHROME_TAMPERMONKEY_WEBREQUEST_EVENT_THRESHOLD);
   const serverUrl = process.env.SERVER_URL || 'http://127.0.0.1:3210';
+  const clientId = process.env.CLIENT_ID || 'legacy-client-1';
+  const clientSecret = process.env.CLIENT_SECRET || '';
+  const accountId = process.env.ACCOUNT_ID || 'default';
+  const clientName = process.env.CLIENT_NAME || '';
 
   const config: ClientConfig = {
     watch: args.watch,
@@ -1172,6 +1183,10 @@ async function main(): Promise<void> {
     serverUrl,
     browserBridgeHost: process.env.BROWSER_BIND_HOST || DEFAULT_BROWSER_BRIDGE_HOST,
     browserWssPort: Number(process.env.BROWSER_WSS_PORT || DEFAULT_BROWSER_WSS_PORT),
+    clientId,
+    clientSecret,
+    accountId,
+    clientName,
   };
 
   setupLogStreams(config);
@@ -1182,17 +1197,47 @@ async function main(): Promise<void> {
     log('已通过 CHROME_PROXY_DISABLED=1 禁用项目 Chrome 代理');
   }
 
+  // Register this client with the server on startup
+  try {
+    const regResp = await fetch(`${config.serverUrl}/api/clients/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-Id': config.clientId,
+        'X-Client-Secret': config.clientSecret,
+      },
+      body: JSON.stringify({
+        clientId: config.clientId,
+        accountId: config.accountId,
+        clientName: config.clientName,
+        clientSecret: config.clientSecret,
+        capabilities: ['crawler', 'qianniu'],
+      }),
+    });
+    if (regResp.ok) {
+      log(`已向 server 注册 client: ${config.clientId} (account: ${config.accountId})`);
+    } else {
+      const body = await regResp.text();
+      log(`client 注册失败 (${regResp.status}): ${body}`);
+    }
+  } catch (err) {
+    log(`client 注册请求失败: ${err.message}（server 可能离线，继续启动）`);
+  }
+
   browserBridgeHandle = startBrowserBridgeServer(config);
   await ensureChromeDebugging(config);
   startChromeWatchdog(config);
 
-  log(`启动 sync.ts，连接 CDP ${config.cdpPort}，同步到 ${serverUrl}`);
+  log(`启动 sync.ts，连接 CDP ${config.cdpPort}，同步到 ${serverUrl}，client: ${config.clientId}`);
   spawnChild(process.execPath, ['sync.ts'], {
     env: {
       ...process.env,
       SERVER_URL: serverUrl,
       CDP_PORT: String(config.cdpPort),
       SYNC_INTERVAL: String(config.syncInterval),
+      CLIENT_ID: config.clientId,
+      CLIENT_SECRET: config.clientSecret,
+      ACCOUNT_ID: config.accountId,
     },
     logTargets: [runtimeLogStream],
   });

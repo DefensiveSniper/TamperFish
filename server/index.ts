@@ -10,6 +10,7 @@ loadOptionalEnvFiles([
 
 const express = require('express');
 const fs = require('fs');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const db = require('./db.ts');
 const { startAutoReplyWorker } = require('./auto_reply_worker.ts');
@@ -18,17 +19,13 @@ const {
   localizeMessages,
   localizeSessions,
 } = require('./media_cache.ts');
+const { securityHeaders, requireBrowserAuth, setupAuthRoutes } = require('./auth.ts');
 
 const app = express();
 const PORT = process.env.PORT || 3210;
 const SERVER_BIND_HOST = process.env.SERVER_BIND_HOST || '0.0.0.0';
 const PUBLIC_MEDIA_ORIGIN_EXPLICIT = process.env.SERVER_PUBLIC_ORIGIN || process.env.BROWSER_MEDIA_ORIGIN || '';
 
-/**
- * 获取媒体缓存资源的公开访问源。
- * 优先使用环境变量显式设置；未设置时，尝试从 HTTP 请求的 Host 头推导；
- * 都不可用时回退到 localhost。
- */
 function getMediaOrigin(req) {
   if (PUBLIC_MEDIA_ORIGIN_EXPLICIT) return PUBLIC_MEDIA_ORIGIN_EXPLICIT;
   if (req && req.headers && req.headers.host) {
@@ -58,7 +55,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-Id, X-Client-Secret, X-Account-Id');
   }
 
   if (req.method === 'OPTIONS') {
@@ -67,13 +64,56 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── Security headers & browser auth ─────────────────────────────────────────
+app.use(securityHeaders);
+setupAuthRoutes(app);
+app.use(requireBrowserAuth);
+
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── POST /api/messages/ingest ─────────────────────────────────────────────────
-// Body: { sessions: { [chatKey]: { customerName, productId, product, messages[] } } }
-// Idempotent — safe to replay the same full snapshot.
+// ── Client auth middleware ────────────────────────────────────────────────────
+// Client-facing APIs require X-Client-Id + X-Client-Secret headers.
+// Frontend/console APIs use X-Account-Id (or default account).
 
-app.post('/api/messages/ingest', async (req, res) => {
+async function authenticateClient(req, res, next) {
+  const clientId = req.headers['x-client-id'];
+  const clientSecret = req.headers['x-client-secret'];
+
+  if (!clientId) {
+    return res.status(401).json({ error: 'X-Client-Id header is required' });
+  }
+
+  const client = await db.getClient(clientId);
+  if (!client || client.status !== 'active') {
+    return res.status(401).json({ error: 'unknown or disabled client' });
+  }
+
+  // Verify secret if one is stored
+  if (client.client_secret_hash && clientSecret) {
+    const hash = crypto.createHash('sha256').update(clientSecret).digest('hex');
+    if (hash !== client.client_secret_hash) {
+      return res.status(401).json({ error: 'invalid client secret' });
+    }
+  }
+
+  req.client = client;
+  req.accountId = client.account_id;
+  req.clientId = client.client_id;
+  next();
+}
+
+function resolveAccountId(req) {
+  // For frontend: prefer explicit header, fallback to default
+  return req.headers['x-account-id'] || req.query.accountId || db.DEFAULT_ACCOUNT_ID;
+}
+
+function resolveClientId(req) {
+  return req.headers['x-client-id'] || req.query.clientId || db.LEGACY_CLIENT_ID;
+}
+
+// ── POST /api/messages/ingest (client-facing) ────────────────────────────────
+
+app.post('/api/messages/ingest', authenticateClient, async (req, res) => {
   const { sessions } = req.body || {};
   if (!sessions || typeof sessions !== 'object') {
     return res.status(400).json({ error: 'body.sessions is required' });
@@ -82,9 +122,9 @@ app.post('/api/messages/ingest', async (req, res) => {
     const localizedSessions = await localizeSessions(sessions, {
       publicOrigin: getMediaOrigin(req),
     });
-    const results = await db.ingest(localizedSessions);
+    const results = await db.ingest(req.accountId, req.clientId, localizedSessions);
     const totalNew = Object.values(results).reduce((s, r) => s + r.newMsgCount, 0);
-    console.log(`[ingest] ${Object.keys(results).length} sessions, ${totalNew} new msgs`);
+    console.log(`[ingest] ${req.clientId}: ${Object.keys(results).length} sessions, ${totalNew} new msgs`);
     res.json({ ok: true, results });
   } catch (err) {
     console.error('[ingest]', err);
@@ -92,24 +132,26 @@ app.post('/api/messages/ingest', async (req, res) => {
   }
 });
 
-// ── GET /api/sessions ─────────────────────────────────────────────────────────
+// ── GET /api/sessions (frontend) ────────────────────────────────────────────
 
-app.get('/api/sessions', async (_req, res) => {
+app.get('/api/sessions', async (req, res) => {
   try {
-    res.json(await db.listSessions());
+    const accountId = resolveAccountId(req);
+    res.json(await db.listSessions(accountId));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/sessions/:chatKey/messages ───────────────────────────────────────
+// ── GET /api/sessions/:chatKey/messages (frontend) ───────────────────────────
 
 app.get('/api/sessions/:chatKey/messages', async (req, res) => {
   try {
-    const session = await db.getSession(req.params.chatKey);
+    const accountId = resolveAccountId(req);
+    const session = await db.getSession(accountId, req.params.chatKey);
     if (!session) return res.status(404).json({ error: 'session not found' });
     const messages = await localizeMessages(
-      await db.getMessages(req.params.chatKey),
+      await db.getMessages(accountId, req.params.chatKey),
       { publicOrigin: getMediaOrigin(req) }
     );
     res.json({ session, messages });
@@ -118,17 +160,31 @@ app.get('/api/sessions/:chatKey/messages', async (req, res) => {
   }
 });
 
-// ── GET /api/settings ─────────────────────────────────────────────────────────
+// ── POST /api/sessions/:chatKey/read (frontend) ─────────────────────────────
 
-app.get('/api/settings', async (_req, res) => {
+app.post('/api/sessions/:chatKey/read', async (req, res) => {
   try {
-    res.json(await db.getRuntimeSettings());
+    const accountId = resolveAccountId(req);
+    await db.markSessionRead(accountId, req.params.chatKey);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── PATCH /api/settings ──────────────────────────────────────────────────────
+// ── GET /api/settings (frontend) ────────────────────────────────────────────
+
+app.get('/api/settings', async (req, res) => {
+  try {
+    const accountId = resolveAccountId(req);
+    const clientId = resolveClientId(req);
+    res.json(await db.getRuntimeSettings(accountId, clientId));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /api/settings (frontend) ──────────────────────────────────────────
 
 app.patch('/api/settings', async (req, res) => {
   const { autoReplyEnabled, crawlerDesiredEnabled, initialCrawlSessionCount } = req.body || {};
@@ -139,44 +195,50 @@ app.patch('/api/settings', async (req, res) => {
   }
 
   try {
+    const accountId = resolveAccountId(req);
+    const clientId = resolveClientId(req);
+
     if (typeof autoReplyEnabled === 'boolean') {
-      await db.setAutoReplyEnabled(autoReplyEnabled);
+      await db.setAutoReplyEnabled(accountId, autoReplyEnabled);
     }
     if (typeof crawlerDesiredEnabled === 'boolean') {
-      await db.setCrawlerDesiredEnabled(crawlerDesiredEnabled);
+      await db.setCrawlerDesiredEnabled(clientId, crawlerDesiredEnabled);
     }
     if (hasCount) {
-      await db.setInitialCrawlSessionCount(initialCrawlSessionCount);
+      await db.setInitialCrawlSessionCount(clientId, initialCrawlSessionCount);
     }
     res.json({
       ok: true,
-      ...(await db.getRuntimeSettings()),
+      ...(await db.getRuntimeSettings(accountId, clientId)),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/initial-crawl ─────────────────────────────────────────────────
+// ── POST /api/initial-crawl (frontend → targets a client) ──────────────────
 
-app.post('/api/initial-crawl', async (_req, res) => {
+app.post('/api/initial-crawl', async (req, res) => {
   try {
-    const result = await db.requestInitialCrawl();
+    const clientId = resolveClientId(req);
+    const result = await db.requestInitialCrawl(clientId);
+    const accountId = resolveAccountId(req);
     res.status(202).json({
       ok: true,
       requestedNonce: result.requestedNonce,
-      ...(await db.getRuntimeSettings()),
+      ...(await db.getRuntimeSettings(accountId, clientId)),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/orders ───────────────────────────────────────────────────────────
+// ── GET /api/orders (frontend) ──────────────────────────────────────────────
 
 app.get('/api/orders', async (req, res) => {
   try {
-    res.json(await db.listOrders({
+    const accountId = resolveAccountId(req);
+    res.json(await db.listOrders(accountId, {
       linked: req.query.linked,
       q: req.query.q,
       limit: req.query.limit,
@@ -187,93 +249,97 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
-// ── GET /api/orders/runtime ───────────────────────────────────────────────────
+// ── GET /api/orders/runtime (frontend) ──────────────────────────────────────
 
-app.get('/api/orders/runtime', async (_req, res) => {
+app.get('/api/orders/runtime', async (req, res) => {
   try {
-    res.json(await db.getQianniuRuntime());
+    const clientId = resolveClientId(req);
+    res.json(await db.getQianniuRuntime(clientId));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/orders/full-scan ────────────────────────────────────────────────
+// ── POST /api/orders/full-scan (frontend → targets a client) ────────────────
 
-app.post('/api/orders/full-scan', async (_req, res) => {
+app.post('/api/orders/full-scan', async (req, res) => {
   try {
-    const result = await db.requestQianniuFullScan();
+    const clientId = resolveClientId(req);
+    const result = await db.requestQianniuFullScan(clientId);
     res.status(202).json({
       ok: true,
       requestedNonce: result.requestedNonce,
-      runtime: result.runtime,
+      runtime: await db.getQianniuRuntime(clientId),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/orders/sync-now ────────────────────────────────────────────────
+// ── POST /api/orders/sync-now (frontend → targets a client) ────────────────
 
-app.post('/api/orders/sync-now', async (_req, res) => {
+app.post('/api/orders/sync-now', async (req, res) => {
   try {
-    const result = await db.requestQianniuSyncNow();
+    const clientId = resolveClientId(req);
+    const result = await db.requestQianniuSyncNow(clientId);
     res.status(202).json({
       ok: true,
       requestedNonce: result.requestedNonce,
-      runtime: result.runtime,
+      runtime: await db.getQianniuRuntime(clientId),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/browser/heartbeat ──────────────────────────────────────────────
+// ── POST /api/browser/heartbeat (client-facing) ────────────────────────────
 
-app.post('/api/browser/heartbeat', async (req, res) => {
+app.post('/api/browser/heartbeat', authenticateClient, async (req, res) => {
   const { crawlerEnabled, initialCrawlNonceHandled = null } = req.body || {};
   if (typeof crawlerEnabled !== 'boolean') {
     return res.status(400).json({ error: 'crawlerEnabled must be boolean' });
   }
 
   try {
-    await db.updateCrawlerHeartbeat({ crawlerEnabled, initialCrawlNonceHandled });
+    await db.updateCrawlerHeartbeat(req.clientId, { crawlerEnabled });
+    if (initialCrawlNonceHandled) {
+      await db.handleCommandNonce(req.clientId, 'initial_crawl', initialCrawlNonceHandled);
+    }
     res.json({
       ok: true,
-      ...(await db.getRuntimeSettings()),
+      ...(await db.getRuntimeSettings(req.accountId, req.clientId)),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/orders/heartbeat ──────────────────────────────────────────────
+// ── POST /api/orders/heartbeat (client-facing) ─────────────────────────────
 
-app.post('/api/orders/heartbeat', async (req, res) => {
+app.post('/api/orders/heartbeat', authenticateClient, async (req, res) => {
   try {
-    res.json(await db.updateQianniuHeartbeat(req.body || {}));
+    res.json(await db.updateQianniuHeartbeat(req.clientId, req.body || {}));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/orders/ingest ─────────────────────────────────────────────────
+// ── POST /api/orders/ingest (client-facing) ─────────────────────────────────
 
-app.post('/api/orders/ingest', async (req, res) => {
+app.post('/api/orders/ingest', authenticateClient, async (req, res) => {
   const { orders, pageContext = {} } = req.body || {};
   if (!Array.isArray(orders)) {
     return res.status(400).json({ error: 'orders must be an array' });
   }
 
   try {
-    res.json(await db.ingestOrders(orders, pageContext));
+    res.json(await db.ingestOrders(req.accountId, req.clientId, orders, pageContext));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/outgoing-messages ───────────────────────────────────────────────
-// Queue a message to be sent by OpenClaw browser automation.
-// Body: { chatKey?, sessionId?, content, source?: 'manual' | 'ai' }
+// ── POST /api/outgoing-messages (frontend) ──────────────────────────────────
 
 app.post('/api/outgoing-messages', async (req, res) => {
   const {
@@ -312,13 +378,15 @@ app.post('/api/outgoing-messages', async (req, res) => {
   }
 
   try {
+    const accountId = resolveAccountId(req);
     const session = chatKey
-      ? await db.getSession(chatKey)
-      : await db.getSessionBySessionId(String(sessionId));
+      ? await db.getSession(accountId, chatKey)
+      : await db.getSessionBySessionId(accountId, String(sessionId));
     if (!session) return res.status(404).json({ error: 'session not found' });
     const effectiveChatKey = session.chat_key;
     const effectiveSessionId = sessionId ? String(sessionId) : (session.session_id || null);
     const result = await db.addOutgoingMessage(
+      accountId,
       effectiveChatKey,
       {
         content: normalizedContent,
@@ -348,70 +416,166 @@ app.post('/api/outgoing-messages', async (req, res) => {
   }
 });
 
-// ── GET /api/outgoing-messages ────────────────────────────────────────────────
-// ?chatKey=<key>&status=pending|sent|failed
+// ── GET /api/outgoing-messages (frontend) ───────────────────────────────────
 
 app.get('/api/outgoing-messages', async (req, res) => {
   try {
-    res.json(await db.listOutgoingMessages(req.query.chatKey, req.query.status));
+    const accountId = resolveAccountId(req);
+    res.json(await db.listOutgoingMessages(accountId, req.query.chatKey, req.query.status));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/outgoing-messages/claim ────────────────────────────────────────
+// ── POST /api/outgoing-messages/claim (client-facing) ───────────────────────
 
-app.post('/api/outgoing-messages/claim', async (_req, res) => {
+app.post('/api/outgoing-messages/claim', authenticateClient, async (req, res) => {
   try {
-    const claimed = await db.claimOutgoingMessage();
+    const claimed = await db.claimOutgoingMessage(req.clientId);
     res.json({ ok: true, message: claimed });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── PATCH /api/outgoing-messages/:id ─────────────────────────────────────────
-// Called by OpenClaw after it attempts browser send.
-// Body: { status: 'sent' | 'failed' }
+// ── PATCH /api/outgoing-messages/:id (client-facing) ────────────────────────
 
-app.patch('/api/outgoing-messages/:id', async (req, res) => {
+app.patch('/api/outgoing-messages/:id', authenticateClient, async (req, res) => {
   const id = Number(req.params.id);
   const { status, error: errMsg } = req.body || {};
   if (!['sent', 'failed'].includes(status)) {
     return res.status(400).json({ error: 'status must be sent or failed' });
   }
   try {
-    await db.updateOutgoingStatus(id, status, errMsg || null);
+    await db.updateOutgoingStatus(id, req.clientId, status, errMsg || null);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// ── Client management APIs (frontend) ───────────────────────────────────────
 
+app.get('/api/clients', async (req, res) => {
+  try {
+    // If ?all=1, return clients across all accounts (for account switcher)
+    const allAccounts = req.query.all === '1';
+    const accountId = allAccounts ? null : resolveAccountId(req);
+    const clients = await db.listClients(accountId);
+    // Enrich with runtime info
+    const enriched = await Promise.all(clients.map(async (client) => {
+      const heartbeat = await db.getClientRuntime(client.client_id, 'crawler_last_heartbeat_at', '0');
+      const heartbeatTs = Number(heartbeat || 0);
+      const isOnline = heartbeatTs > 0 && (Math.floor(Date.now() / 1000) - heartbeatTs) <= 12;
+      return { ...client, isOnline, lastHeartbeatAt: heartbeatTs };
+    }));
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-// ── SPA fallback ──────────────────────────────────────────────────────────────
+app.get('/api/clients/:clientId/runtime', async (req, res) => {
+  try {
+    const client = await db.getClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'client not found' });
+    const [settings, qianniu] = await Promise.all([
+      db.getRuntimeSettings(client.account_id, client.client_id),
+      db.getQianniuRuntime(client.client_id),
+    ]);
+    res.json({ settings, qianniu, client });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/clients/:clientId/initial-crawl', async (req, res) => {
+  try {
+    const client = await db.getClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'client not found' });
+    const result = await db.requestInitialCrawl(client.client_id);
+    res.status(202).json({ ok: true, requestedNonce: result.requestedNonce });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/clients/:clientId/orders/sync-now', async (req, res) => {
+  try {
+    const client = await db.getClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'client not found' });
+    const result = await db.requestQianniuSyncNow(client.client_id);
+    res.status(202).json({
+      ok: true,
+      requestedNonce: result.requestedNonce,
+      runtime: await db.getQianniuRuntime(client.client_id),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/clients/:clientId/orders/full-scan', async (req, res) => {
+  try {
+    const client = await db.getClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'client not found' });
+    const result = await db.requestQianniuFullScan(client.client_id);
+    res.status(202).json({
+      ok: true,
+      requestedNonce: result.requestedNonce,
+      runtime: await db.getQianniuRuntime(client.client_id),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/clients/register', async (req, res) => {
+  const { clientId, accountId, clientName, clientSecret, capabilities } = req.body || {};
+  if (!clientId || !accountId) {
+    return res.status(400).json({ error: 'clientId and accountId are required' });
+  }
+  try {
+    const secretHash = clientSecret
+      ? crypto.createHash('sha256').update(clientSecret).digest('hex')
+      : '';
+    await db.registerClient(clientId, accountId, clientName || '', secretHash, capabilities || []);
+    // Ensure default settings for this client
+    await db.ensureRuntimeSettings(accountId, clientId, {
+      autoReplyEnabled: process.env.AUTO_REPLY_ENABLED !== '0',
+      crawlerDesiredEnabled: process.env.CRAWLER_DESIRED_ENABLED !== '0',
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── SPA fallback ────────────────────────────────────────────────────────────
 
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-/**
- * 初始化服务启动时需要的运行时设置，避免 UI 开关缺省态不确定。
- * @returns {Promise<void>}
- */
 async function bootstrapSettings() {
-  await db.ensureRuntimeSettings({
+  // Ensure legacy client exists for backward compatibility
+  await db.registerClient(
+    db.LEGACY_CLIENT_ID,
+    db.DEFAULT_ACCOUNT_ID,
+    'Legacy Client',
+    '',
+    ['crawler', 'qianniu']
+  );
+
+  await db.ensureRuntimeSettings(db.DEFAULT_ACCOUNT_ID, db.LEGACY_CLIENT_ID, {
     autoReplyEnabled: process.env.AUTO_REPLY_ENABLED !== '0',
     crawlerDesiredEnabled: process.env.CRAWLER_DESIRED_ENABLED !== '0',
   });
-  // 每次服务启动时生成新的初始遍历 nonce，油猴脚本首次 heartbeat 时触发遍历
-  await db.requestInitialCrawl();
+
+  // Request initial crawl on startup
+  await db.requestInitialCrawl(db.LEGACY_CLIENT_ID);
 }
 
-/**
- * 如果 public/ 目录不存在，自动构建前端。
- */
 function ensureFrontendBuilt() {
   const publicDir = path.join(__dirname, 'public');
   const frontendDir = path.join(__dirname, 'frontend');
@@ -427,10 +591,6 @@ function ensureFrontendBuilt() {
   }
 }
 
-/**
- * 启动 Express 与自动回复 worker。
- * @returns {Promise<void>}
- */
 async function startServer() {
   ensureFrontendBuilt();
   await bootstrapSettings();
