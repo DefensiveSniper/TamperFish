@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AppProvider, useAppState } from './context/AppContext';
 import { usePolling } from './context/usePolling';
 import { useIsMobile } from './hooks/useIsMobile';
@@ -11,13 +11,30 @@ import OrdersOverlay from './components/OrdersDrawer/OrdersOverlay';
 import OrdersDrawer from './components/OrdersDrawer/OrdersDrawer';
 import Toast from './components/Toast/Toast';
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedValue(value);
+    }, delayMs);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [value, delayMs]);
+
+  return debouncedValue;
+}
+
 function AppContent() {
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 180);
   const { activeKey } = useAppState();
   const isMobile = useIsMobile();
 
   // Start polling for data
-  usePolling(3000);
+  usePolling(3000, debouncedSearchQuery);
 
   // Pin layout to visual viewport (fixes iOS Safari keyboard)
   useViewportHeight();
@@ -32,7 +49,7 @@ function AppContent() {
     <>
       <Header searchQuery={searchQuery} onSearchChange={setSearchQuery} />
       <div className={`layout${isMobile ? ` mobile-view-${mobileView}` : ''}`}>
-        <Sidebar searchQuery={searchQuery} />
+        <Sidebar searchQuery={debouncedSearchQuery} />
         <ChatPanel />
       </div>
       <OrdersOverlay />

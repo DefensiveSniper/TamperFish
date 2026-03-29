@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } fro
 import { postOutgoingMessage } from '../../services/outgoingApi';
 import { useToast } from '../../hooks/useToast';
 import { useAppDispatch, useAppState } from '../../context/AppContext';
-import { getSessionMessages } from '../../services/sessionsApi';
-import { getOutgoingMessages } from '../../services/outgoingApi';
-import { getOrders } from '../../services/ordersApi';
-import type { ChatSnapshot, Message, Session } from '../../types/api';
+import type { LocalOutgoingMessage, Message, Session } from '../../types/api';
+import { resolveChatImageUrl } from '../../utils/mediaUrl';
 
 interface ReplyBarProps {
   chatKey: string;
@@ -38,9 +36,10 @@ function renderReplyChipPreview(message: Message | null) {
   }
 
   if (message.type === 'image') {
+    const resolvedReplyImage = resolveChatImageUrl(message.content);
     return (
       <div className="outbox-reply-image-wrap">
-        <img className="outbox-reply-image" src={message.content} alt="引用图片" />
+        <img className="outbox-reply-image" src={resolvedReplyImage} alt="引用图片" />
         <span className="outbox-reply-image-label">图片引用</span>
       </div>
     );
@@ -100,19 +99,13 @@ export default function ReplyBar({
     setSelectedImageName(null);
   }, [replyingMessage, selectedImageData]);
 
-  const refreshChatSnapshot = async () => {
-    try {
-      const [{ session: s, messages }, outgoing, linkedOrders] = await Promise.all([
-        getSessionMessages(chatKey),
-        getOutgoingMessages(chatKey),
-        getOrders({ chatKey, limit: 10 }),
-      ]);
-      const snapshot: ChatSnapshot = { session: s, messages, outgoing, linkedOrders };
-      dispatch({ type: 'SET_CHAT_CACHE', chatKey, snapshot });
-    } catch {
-      // non-critical
+  useEffect(() => {
+    if (selectedImageData) {
+      return;
     }
-  };
+
+    inputRef.current?.focus();
+  }, [chatKey, selectedImageData]);
 
   const handlePickImage = () => {
     if (sending) return;
@@ -162,6 +155,7 @@ export default function ReplyBar({
     }
 
     setSending(true);
+    const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       const r = await postOutgoingMessage(
         hasImage
@@ -185,18 +179,51 @@ export default function ReplyBar({
           }
       );
       if (r.ok) {
+        const optimisticOutgoing: LocalOutgoingMessage = {
+          local_id: localId,
+          id: r.id,
+          account_id: session.account_id,
+          chat_key: chatKey,
+          customer_name: session.customer_name,
+          product_id: session.product_id,
+          session_id: session.session_id,
+          content: hasImage ? '' : trimmed,
+          message_type: hasImage ? 'image' : 'text',
+          media_data: hasImage ? (selectedImageData || null) : null,
+          media_name: hasImage ? (selectedImageName || null) : null,
+          reply_to_external_message_id: replyingMessage?.external_message_id || null,
+          reply_to_preview: replyingMessage ? buildReplyPreview(replyingMessage) : null,
+          reply_to_type: replyingMessage?.type || null,
+          target_client_id: null,
+          claimed_by_client_id: null,
+          status: 'pending',
+          source: 'manual',
+          created_at: Math.floor(Date.now() / 1000),
+          sent_at: null,
+          claimed_at: null,
+          error: null,
+          retries: 0,
+        };
+
+        dispatch({ type: 'UPSERT_LOCAL_OUTGOING', chatKey, item: optimisticOutgoing });
+
         setContent('');
         clearSelectedImage();
         onCancelReply();
         toast(
-          `${r.messageType === 'image' ? '图片' : '人工回复'}已入队 #${r.id}`,
+          `${r.messageType === 'image' ? '图片' : '消息'}已显示，正在发送`,
           'success'
         );
-        await refreshChatSnapshot();
       } else {
         toast('入队失败', 'error');
       }
     } catch (e: unknown) {
+      dispatch({
+        type: 'MARK_LOCAL_OUTGOING_FAILED',
+        chatKey,
+        localId,
+        error: (e as Error).message,
+      });
       toast((e as Error).message, 'error');
     } finally {
       setSending(false);

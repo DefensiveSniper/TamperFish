@@ -25,3 +25,16 @@ export function postOutgoingMessage(body: PostOutgoingMessageBody): Promise<{
     body: JSON.stringify(body),
   });
 }
+
+export function retryOutgoingMessage(id: number): Promise<{
+  ok: boolean;
+  id: number;
+  source: string;
+  messageType: 'text' | 'image';
+  chatKey: string;
+  sessionId: string | null;
+}> {
+  return apiFetch(`/api/outgoing-messages/${id}/retry`, {
+    method: 'POST',
+  });
+}

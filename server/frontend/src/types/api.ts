@@ -18,6 +18,9 @@ export interface Session {
   last_is_me: number | null; // 0 or 1
   last_time: number | null;
   pending_count: number;
+  search_match_preview?: string | null;
+  search_match_external_message_id?: string | null;
+  search_match_field?: 'customer_name' | 'chat_key' | 'product_id' | 'message' | null;
 }
 
 export interface ProductInfo {
@@ -40,6 +43,8 @@ export interface Message {
   ingested_at: number;
   external_message_id: string | null;
   reply_to_message_id: string | null;
+  outgoing_message_id?: number | null;
+  outgoing_status?: OutgoingMessage['status'] | null;
 }
 
 export interface OutgoingMessage {
@@ -51,6 +56,7 @@ export interface OutgoingMessage {
   session_id: string | null;
   content: string;
   message_type: 'text' | 'image';
+  media_data?: string | null;
   media_name: string | null;
   reply_to_external_message_id: string | null;
   reply_to_preview: string | null;
@@ -64,6 +70,18 @@ export interface OutgoingMessage {
   claimed_at: number | null;
   error: string | null;
   retries: number;
+}
+
+export interface LocalOutgoingMessage extends OutgoingMessage {
+  local_id: string;
+}
+
+export interface ChatMessageItem {
+  kind: 'message' | 'outgoing';
+  sortTime: number;
+  sortSeq?: number;
+  message?: Message;
+  outgoing?: OutgoingMessage;
 }
 
 export interface PostOutgoingMessageBody {

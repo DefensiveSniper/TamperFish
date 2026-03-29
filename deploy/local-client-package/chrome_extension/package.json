@@ -1,0 +1,15 @@
+{
+  "name": "tamperfish-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch --entry content_script"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.0.0"
+  }
+}

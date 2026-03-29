@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from 'react';
-import type { Message } from '../../types/api';
+import React, { useLayoutEffect, useRef } from 'react';
+import type { ChatMessageItem, Message, OutgoingMessage } from '../../types/api';
 import MessageBubble from './MessageBubble';
 
 const FIVE_MINUTES_S = 5 * 60;
@@ -39,35 +39,51 @@ function needsDivider(prevTsSeconds: number | null, curTsSeconds: number): boole
 }
 
 interface MessageListProps {
-  messages: Message[];
+  items: ChatMessageItem[];
   customerName: string;
   onReply: (message: Message) => void;
+  onPreviewImage?: (imageUrl: string) => void;
+  highlightedMessageId?: string | null;
+  onJumpToMessage?: (externalMessageId: string) => void;
+  animateMessages?: boolean;
+  onRetryOutgoing?: (item: OutgoingMessage) => void;
 }
 
-export default function MessageList({ messages, customerName, onReply }: MessageListProps) {
+export default function MessageList({
+  items,
+  customerName,
+  onReply,
+  onPreviewImage,
+  highlightedMessageId,
+  onJumpToMessage,
+  animateMessages = false,
+  onRetryOutgoing,
+}: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0);
   const messageByExternalId = new Map(
-    messages
+    items
+      .map((item) => item.message)
+      .filter((message): message is Message => Boolean(message))
       .filter((message) => Boolean(message.external_message_id))
       .map((message) => [message.external_message_id as string, message])
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
     // Auto-scroll to bottom on new messages
-    const isNewMessage = messages.length > prevCountRef.current;
-    prevCountRef.current = messages.length;
+    const isNewMessage = items.length > prevCountRef.current;
+    prevCountRef.current = items.length;
 
     if (isNewMessage) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [items]);
 
   // On first mount, scroll to bottom
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (el) {
       el.scrollTop = el.scrollHeight;
@@ -76,30 +92,48 @@ export default function MessageList({ messages, customerName, onReply }: Message
 
   return (
     <div id="messages" ref={containerRef}>
-      {messages.length > 0 ? (
-        messages.flatMap((m, i) => {
-          const prevTs = i === 0 ? null : (messages[i - 1]?.ingested_at ?? null);
-          const items: React.ReactNode[] = [];
+      {items.length > 0 ? (
+        items.flatMap((item, i) => {
+          const currentTs = item.kind === 'message'
+            ? (item.message?.ingested_at ?? item.sortTime)
+            : item.sortTime;
+          const prevItem = i === 0 ? null : items[i - 1];
+          const prevTs = !prevItem
+            ? null
+            : prevItem.kind === 'message'
+              ? (prevItem.message?.ingested_at ?? prevItem.sortTime)
+              : prevItem.sortTime;
+          const renderedItems: React.ReactNode[] = [];
 
-          if (needsDivider(prevTs, m.ingested_at)) {
-            items.push(
-              <div key={`divider-${m.id}`} className="msg-divider">
-                <span>{formatDividerTime(m.ingested_at)}</span>
+          if (needsDivider(prevTs, currentTs)) {
+            renderedItems.push(
+              <div key={`divider-${item.kind}-${item.kind === 'message' ? item.message?.id : item.outgoing?.id}`} className="msg-divider">
+                <span>{formatDividerTime(currentTs)}</span>
               </div>
             );
           }
 
-          items.push(
+          const message = item.message || null;
+          const outgoing = item.outgoing || null;
+          const outgoingKeySuffix = outgoing && 'local_id' in outgoing ? outgoing.local_id : '';
+
+          renderedItems.push(
             <MessageBubble
-              key={m.id}
-              message={m}
+              key={`${item.kind}-${message?.id ?? outgoing?.id}-${outgoingKeySuffix}`}
+              message={message}
+              outgoing={outgoing}
               customerName={customerName}
+              animateDelay={animateMessages ? i * 18 : undefined}
               onReply={onReply}
-              repliedMessage={m.reply_to_message_id ? messageByExternalId.get(m.reply_to_message_id) || null : null}
+              onPreviewImage={onPreviewImage}
+              onJumpToMessage={onJumpToMessage}
+              isHighlighted={Boolean(highlightedMessageId && message?.external_message_id === highlightedMessageId)}
+              repliedMessage={message?.reply_to_message_id ? messageByExternalId.get(message.reply_to_message_id) || null : null}
+              onRetryOutgoing={onRetryOutgoing}
             />
           );
 
-          return items;
+          return renderedItems;
         })
       ) : (
         <div

@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node index.ts",
     "dev": "node --watch index.ts",
+    "audit:chat-keys": "node audit_chat_key_switches.js",
     "build:frontend": "cd frontend && npm run build && cd ..",
     "dev:frontend": "cd frontend && npm run dev && cd ..",
     "worker": "node auto_reply_worker.ts",

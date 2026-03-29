@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, type ReactNode } from 'react';
-import type { Session, AppSettings, QianniuRuntime, Order, ChatSnapshot, Client } from '../types/api';
+import type { Session, AppSettings, QianniuRuntime, Order, ChatSnapshot, Client, LocalOutgoingMessage, OutgoingMessage, Message } from '../types/api';
 
 export interface AppState {
   sessions: Session[];
@@ -7,11 +7,13 @@ export interface AppState {
   appSettings: AppSettings;
   qianniuRuntime: QianniuRuntime;
   chatCache: Record<string, ChatSnapshot>;
+  localOutgoingByChat: Record<string, LocalOutgoingMessage[]>;
   ordersCache: Order[];
   ordersFilter: 'all' | 'linked' | 'unlinked';
   ordersSearch: string;
   isOrdersDrawerOpen: boolean;
   toast: { message: string; type: 'success' | 'error' | '' } | null;
+  bootstrapError: string | null;
   // Multi-client state
   clients: Client[];
   activeClientId: string;
@@ -45,13 +47,15 @@ const initialState: AppState = {
   appSettings: defaultSettings,
   qianniuRuntime: defaultRuntime,
   chatCache: {},
+  localOutgoingByChat: {},
   ordersCache: [],
   ordersFilter: 'all',
   ordersSearch: '',
   isOrdersDrawerOpen: false,
   toast: null,
+  bootstrapError: null,
   clients: [],
-  activeClientId: 'legacy-client-1',
+  activeClientId: '',
   activeAccountId: 'default',
 };
 
@@ -61,12 +65,16 @@ type Action =
   | { type: 'SET_SETTINGS'; settings: AppSettings }
   | { type: 'SET_RUNTIME'; runtime: QianniuRuntime }
   | { type: 'SET_CHAT_CACHE'; chatKey: string; snapshot: ChatSnapshot }
+  | { type: 'UPSERT_LOCAL_OUTGOING'; chatKey: string; item: LocalOutgoingMessage }
+  | { type: 'MARK_LOCAL_OUTGOING_FAILED'; chatKey: string; localId: string; error: string }
+  | { type: 'RECONCILE_LOCAL_OUTGOING'; chatKey: string; outgoing: OutgoingMessage[]; messages: Message[] }
   | { type: 'SET_ORDERS'; orders: Order[] }
   | { type: 'SET_ORDERS_FILTER'; filter: 'all' | 'linked' | 'unlinked' }
   | { type: 'SET_ORDERS_SEARCH'; search: string }
   | { type: 'TOGGLE_ORDERS_DRAWER'; open?: boolean }
   | { type: 'SHOW_TOAST'; message: string; toastType: 'success' | 'error' | '' }
   | { type: 'CLEAR_TOAST' }
+  | { type: 'SET_BOOTSTRAP_ERROR'; error: string | null }
   | { type: 'SET_CLIENTS'; clients: Client[] }
   | { type: 'SET_ACTIVE_CLIENT'; clientId: string }
   | { type: 'SET_ACTIVE_ACCOUNT'; accountId: string };
@@ -83,6 +91,77 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, qianniuRuntime: action.runtime };
     case 'SET_CHAT_CACHE':
       return { ...state, chatCache: { ...state.chatCache, [action.chatKey]: action.snapshot } };
+    case 'UPSERT_LOCAL_OUTGOING': {
+      const current = state.localOutgoingByChat[action.chatKey] || [];
+      return {
+        ...state,
+        localOutgoingByChat: {
+          ...state.localOutgoingByChat,
+          [action.chatKey]: [...current.filter((item) => item.local_id !== action.item.local_id), action.item],
+        },
+      };
+    }
+    case 'MARK_LOCAL_OUTGOING_FAILED': {
+      const current = state.localOutgoingByChat[action.chatKey] || [];
+      return {
+        ...state,
+        localOutgoingByChat: {
+          ...state.localOutgoingByChat,
+          [action.chatKey]: current.map((item) => (
+            item.local_id === action.localId
+              ? {
+                ...item,
+                status: 'failed',
+                error: action.error,
+              }
+              : item
+          )),
+        },
+      };
+    }
+    case 'RECONCILE_LOCAL_OUTGOING': {
+      const current = state.localOutgoingByChat[action.chatKey] || [];
+      if (!current.length) {
+        return state;
+      }
+
+      const serverOutgoingById = new Map(action.outgoing.map((item) => [item.id, item]));
+      const deliveredOutgoingIds = new Set(
+        action.messages
+          .map((message) => message.outgoing_message_id)
+          .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      );
+
+      return {
+        ...state,
+        localOutgoingByChat: {
+          ...state.localOutgoingByChat,
+          [action.chatKey]: current.flatMap((item) => {
+            if (deliveredOutgoingIds.has(item.id)) {
+              return [];
+            }
+
+            const serverItem = serverOutgoingById.get(item.id);
+            if (serverItem) {
+              return [{
+                ...item,
+                status: serverItem.status,
+                sent_at: serverItem.sent_at,
+                claimed_at: serverItem.claimed_at,
+                error: serverItem.error,
+                retries: serverItem.retries,
+              }];
+            }
+
+            if (item.status === 'failed') {
+              return [item];
+            }
+
+            return [item];
+          }),
+        },
+      };
+    }
     case 'SET_ORDERS':
       return { ...state, ordersCache: action.orders };
     case 'SET_ORDERS_FILTER':
@@ -95,6 +174,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, toast: { message: action.message, type: action.toastType } };
     case 'CLEAR_TOAST':
       return { ...state, toast: null };
+    case 'SET_BOOTSTRAP_ERROR':
+      return { ...state, bootstrapError: action.error };
     case 'SET_CLIENTS': {
       const ids = action.clients.map((c) => c.client_id);
       const needFix = ids.length > 0 && !ids.includes(state.activeClientId);

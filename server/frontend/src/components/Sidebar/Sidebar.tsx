@@ -8,23 +8,20 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ searchQuery }: SidebarProps) {
-  const { sessions, activeKey, chatCache } = useAppState();
+  const { sessions, activeKey, chatCache, bootstrapError } = useAppState();
   const dispatch = useAppDispatch();
 
-  const filtered = searchQuery
-    ? sessions.filter((s) => {
-        const lq = searchQuery.toLowerCase();
-        return (
-          s.customer_name.toLowerCase().includes(lq) ||
-          (s.chat_key || '').toLowerCase().includes(lq) ||
-          (s.last_message || '').toLowerCase().includes(lq) ||
-          (s.product_id || '').includes(lq)
-        );
-      })
-    : sessions;
+  const filtered = sessions;
 
-  const handleClick = (chatKey: string) => {
+  const handleClick = (chatKey: string, externalMessageId?: string | null) => {
     dispatch({ type: 'SET_ACTIVE_KEY', key: chatKey });
+    if (externalMessageId) {
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('tamperfish:jump-to-message', {
+          detail: { chatKey, externalMessageId },
+        }));
+      }, 0);
+    }
     postMarkSessionRead(chatKey).catch(() => {});
   };
 
@@ -32,7 +29,7 @@ export default function Sidebar({ searchQuery }: SidebarProps) {
     <div id="sidebar">
       {filtered.length === 0 ? (
         <div id="sidebar-msg">
-          {sessions.length === 0 ? '加载中...' : '🔍 无匹配结果'}
+          {sessions.length === 0 ? (bootstrapError || (searchQuery ? '🔍 无匹配结果' : '加载中...')) : '🔍 无匹配结果'}
         </div>
       ) : (
         filtered.map((session, index) => {
@@ -49,6 +46,7 @@ export default function Sidebar({ searchQuery }: SidebarProps) {
               isActive={activeKey === session.chat_key}
               pendingCount={pendingCount}
               onClick={handleClick}
+              searchQuery={searchQuery}
               index={index}
             />
           );

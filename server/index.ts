@@ -18,6 +18,8 @@ const {
   cacheRemoteImages,
   localizeMessages,
   localizeSessions,
+  repairLocalizedMessages,
+  serveCachedMediaRequest,
 } = require('./media_cache.ts');
 const { securityHeaders, requireBrowserAuth, setupAuthRoutes } = require('./auth.ts');
 
@@ -67,6 +69,12 @@ app.use((req, res, next) => {
 // ── Security headers & browser auth ─────────────────────────────────────────
 app.use(securityHeaders);
 setupAuthRoutes(app);
+app.use(async (req, res, next) => {
+  if (await serveCachedMediaRequest(req, res)) {
+    return;
+  }
+  next();
+});
 app.use(requireBrowserAuth);
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -76,7 +84,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Frontend/console APIs use X-Account-Id (or default account).
 
 async function authenticateClient(req, res, next) {
-  const clientId = req.headers['x-client-id'];
+  const clientId = decodeHeaderValue(req.headers['x-client-id']);
   const clientSecret = req.headers['x-client-secret'];
 
   if (!clientId) {
@@ -104,11 +112,31 @@ async function authenticateClient(req, res, next) {
 
 function resolveAccountId(req) {
   // For frontend: prefer explicit header, fallback to default
-  return req.headers['x-account-id'] || req.query.accountId || db.DEFAULT_ACCOUNT_ID;
+  return decodeHeaderValue(req.headers['x-account-id']) || req.query.accountId || db.DEFAULT_ACCOUNT_ID;
 }
 
-function resolveClientId(req) {
-  return req.headers['x-client-id'] || req.query.clientId || db.LEGACY_CLIENT_ID;
+async function resolveClientId(req) {
+  const explicitClientId = decodeHeaderValue(req.headers['x-client-id']) || req.query.clientId;
+  if (explicitClientId) {
+    return explicitClientId;
+  }
+
+  const accountId = resolveAccountId(req);
+  const clients = await db.listClients(accountId);
+  return clients[0]?.client_id || '';
+}
+
+function decodeHeaderValue(value) {
+  const normalized = Array.isArray(value) ? value[0] : value;
+  if (typeof normalized !== 'string' || !normalized) {
+    return '';
+  }
+
+  try {
+    return decodeURIComponent(normalized);
+  } catch {
+    return normalized;
+  }
 }
 
 // ── POST /api/messages/ingest (client-facing) ────────────────────────────────
@@ -137,7 +165,9 @@ app.post('/api/messages/ingest', authenticateClient, async (req, res) => {
 app.get('/api/sessions', async (req, res) => {
   try {
     const accountId = resolveAccountId(req);
-    res.json(await db.listSessions(accountId));
+    const query = typeof req.query.q === 'string' ? req.query.q : '';
+    const sessions = await db.listSessions(accountId, query);
+    res.json(sessions);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -150,10 +180,11 @@ app.get('/api/sessions/:chatKey/messages', async (req, res) => {
     const accountId = resolveAccountId(req);
     const session = await db.getSession(accountId, req.params.chatKey);
     if (!session) return res.status(404).json({ error: 'session not found' });
-    const messages = await localizeMessages(
+    const publicOrigin = getMediaOrigin(req);
+    const messages = await repairLocalizedMessages(await localizeMessages(
       await db.getMessages(accountId, req.params.chatKey),
-      { publicOrigin: getMediaOrigin(req) }
-    );
+      { publicOrigin }
+    ), { publicOrigin });
     res.json({ session, messages });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -177,7 +208,7 @@ app.post('/api/sessions/:chatKey/read', async (req, res) => {
 app.get('/api/settings', async (req, res) => {
   try {
     const accountId = resolveAccountId(req);
-    const clientId = resolveClientId(req);
+    const clientId = await resolveClientId(req);
     res.json(await db.getRuntimeSettings(accountId, clientId));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -196,7 +227,7 @@ app.patch('/api/settings', async (req, res) => {
 
   try {
     const accountId = resolveAccountId(req);
-    const clientId = resolveClientId(req);
+    const clientId = await resolveClientId(req);
 
     if (typeof autoReplyEnabled === 'boolean') {
       await db.setAutoReplyEnabled(accountId, autoReplyEnabled);
@@ -220,7 +251,7 @@ app.patch('/api/settings', async (req, res) => {
 
 app.post('/api/initial-crawl', async (req, res) => {
   try {
-    const clientId = resolveClientId(req);
+    const clientId = await resolveClientId(req);
     const result = await db.requestInitialCrawl(clientId);
     const accountId = resolveAccountId(req);
     res.status(202).json({
@@ -253,7 +284,7 @@ app.get('/api/orders', async (req, res) => {
 
 app.get('/api/orders/runtime', async (req, res) => {
   try {
-    const clientId = resolveClientId(req);
+    const clientId = await resolveClientId(req);
     res.json(await db.getQianniuRuntime(clientId));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -264,7 +295,7 @@ app.get('/api/orders/runtime', async (req, res) => {
 
 app.post('/api/orders/full-scan', async (req, res) => {
   try {
-    const clientId = resolveClientId(req);
+    const clientId = await resolveClientId(req);
     const result = await db.requestQianniuFullScan(clientId);
     res.status(202).json({
       ok: true,
@@ -280,7 +311,7 @@ app.post('/api/orders/full-scan', async (req, res) => {
 
 app.post('/api/orders/sync-now', async (req, res) => {
   try {
-    const clientId = resolveClientId(req);
+    const clientId = await resolveClientId(req);
     const result = await db.requestQianniuSyncNow(clientId);
     res.status(202).json({
       ok: true,
@@ -454,6 +485,36 @@ app.patch('/api/outgoing-messages/:id', authenticateClient, async (req, res) => 
   }
 });
 
+app.post('/api/outgoing-messages/:id/retry', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: 'invalid outgoing message id' });
+  }
+
+  try {
+    const accountId = resolveAccountId(req);
+    const item = await db.getOutgoingMessageById(id, accountId);
+    if (!item) {
+      return res.status(404).json({ error: 'outgoing message not found' });
+    }
+    if (item.status !== 'failed') {
+      return res.status(400).json({ error: 'only failed messages can be retried' });
+    }
+
+    await db.retryOutgoingMessage(id, accountId);
+    res.json({
+      ok: true,
+      id: item.id,
+      source: item.source,
+      messageType: item.message_type,
+      chatKey: item.chat_key,
+      sessionId: item.session_id,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Client management APIs (frontend) ───────────────────────────────────────
 
 app.get('/api/clients', async (req, res) => {
@@ -558,22 +619,7 @@ app.get('*', (_req, res) => {
 });
 
 async function bootstrapSettings() {
-  // Ensure legacy client exists for backward compatibility
-  await db.registerClient(
-    db.LEGACY_CLIENT_ID,
-    db.DEFAULT_ACCOUNT_ID,
-    'Legacy Client',
-    '',
-    ['crawler', 'qianniu']
-  );
-
-  await db.ensureRuntimeSettings(db.DEFAULT_ACCOUNT_ID, db.LEGACY_CLIENT_ID, {
-    autoReplyEnabled: process.env.AUTO_REPLY_ENABLED !== '0',
-    crawlerDesiredEnabled: process.env.CRAWLER_DESIRED_ENABLED !== '0',
-  });
-
-  // Request initial crawl on startup
-  await db.requestInitialCrawl(db.LEGACY_CLIENT_ID);
+  await db.removeClient(db.LEGACY_CLIENT_ID);
 }
 
 function ensureFrontendBuilt() {

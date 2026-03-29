@@ -4,6 +4,98 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function normalizeComparableText(value: string | null | undefined): string {
+  return String(value || '')
+    .replace(/[\s\n\r]+/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function isEquivalentAuthorAlias(
+  candidate: string | null | undefined,
+  repliedAuthorLabel?: string | null,
+): boolean {
+  const normalizedCandidate = normalizeComparableText(candidate);
+  const normalizedAuthor = normalizeComparableText(repliedAuthorLabel);
+
+  if (!normalizedCandidate || !normalizedAuthor) {
+    return false;
+  }
+
+  if (normalizedCandidate === normalizedAuthor) {
+    return true;
+  }
+
+  return (normalizedAuthor === '我' && normalizedCandidate.length > 0)
+    || (normalizedCandidate === '我' && normalizedAuthor.length > 0);
+}
+
+function stripLeadingEquivalentAuthorLine(
+  content: string,
+  repliedAuthorLabel?: string | null,
+): string {
+  const normalizedContent = content.trim();
+  const lines = normalizedContent.split(/\r?\n/);
+  if (lines.length < 2) {
+    return normalizedContent;
+  }
+
+  const [firstLine, ...restLines] = lines;
+  if (!isEquivalentAuthorAlias(firstLine, repliedAuthorLabel)) {
+    return normalizedContent;
+  }
+
+  return restLines.join('\n').trim() || normalizedContent;
+}
+
+function stripLeadingQuotedTextBlock(content: string, quotedText: string): string {
+  const normalizedContent = content.trim();
+  if (!normalizedContent || !quotedText) {
+    return normalizedContent;
+  }
+
+  const quotedPrefixPattern = buildQuotedPrefixPattern([quotedText]);
+  if (!quotedPrefixPattern) {
+    return normalizedContent;
+  }
+
+  const matchedPrefix = normalizedContent.match(quotedPrefixPattern);
+  if (!matchedPrefix) {
+    return normalizedContent;
+  }
+
+  return normalizedContent.slice(matchedPrefix[0].length).trim() || normalizedContent;
+}
+
+function stripAuthorThenQuotedTextBlock(
+  content: string,
+  quotedText: string,
+  repliedAuthorLabel?: string | null,
+): string {
+  const normalizedContent = content.trim();
+  if (!normalizedContent || !quotedText || !repliedAuthorLabel) {
+    return normalizedContent;
+  }
+
+  const lines = normalizedContent.split(/\r?\n/);
+  if (lines.length < 3) {
+    return normalizedContent;
+  }
+
+  const [firstLine, ...restLines] = lines;
+  if (!isEquivalentAuthorAlias(firstLine, repliedAuthorLabel)) {
+    return normalizedContent;
+  }
+
+  const restContent = restLines.join('\n').trim();
+  const strippedRest = stripLeadingQuotedTextBlock(restContent, quotedText);
+  if (strippedRest === restContent) {
+    return normalizedContent;
+  }
+
+  return strippedRest || normalizedContent;
+}
+
 function buildQuotedPrefixPattern(parts: Array<string | null | undefined>): RegExp | null {
   const normalizedParts = parts
     .map((part) => part?.trim() ?? '')
@@ -58,6 +150,11 @@ export function stripQuotedReplyPrefix(
     return content;
   }
 
+  if (repliedMessage?.type === 'image') {
+    const withoutAliasLine = stripLeadingEquivalentAuthorLine(content, repliedAuthorLabel);
+    return withoutAliasLine || content;
+  }
+
   if (!repliedMessage || repliedMessage.type !== 'text') {
     return content;
   }
@@ -65,6 +162,56 @@ export function stripQuotedReplyPrefix(
   const quotedText = repliedMessage.content.trim();
   if (!quotedText) {
     return content;
+  }
+
+  function stripLeadingReplyHeader(content: string, quotedText: string, repliedAuthorLabel?: string | null): string {
+    const normalizedAuthor = repliedAuthorLabel?.trim() ?? '';
+    const escapedQuotedText = escapeRegex(quotedText).replace(/\s+/g, '\\s+');
+    const escapedAuthor = normalizedAuthor
+      ? escapeRegex(normalizedAuthor).replace(/\s+/g, '\\s+')
+      : '[^\\n\\r]+';
+    const replyHeaderPattern = new RegExp(
+      `^\\s*引用\\s+${escapedAuthor}\\s+的消息[\\s\\n\\r]+${escapedQuotedText}(?:[\\s\\n\\r]+|$)`,
+      'u'
+    );
+
+    const matchedHeader = content.match(replyHeaderPattern);
+    if (!matchedHeader) {
+      return content;
+    }
+
+    let remainder = content.slice(matchedHeader[0].length).trim();
+    const aliasAndQuoteMatch = remainder.match(/^([^\n\r]+)[\s\n\r]+([\s\S]+)$/u);
+    if (aliasAndQuoteMatch) {
+      const [, aliasLine, restContent] = aliasAndQuoteMatch;
+      const normalizedRest = (restContent || '').trim();
+      if (isEquivalentAuthorAlias(aliasLine, repliedAuthorLabel) && normalizedRest.startsWith(quotedText)) {
+        remainder = normalizedRest.slice(quotedText.length).trim();
+      }
+    }
+
+    return remainder || content;
+  }
+
+  const strippedReplyHeader = stripLeadingReplyHeader(content, quotedText, repliedAuthorLabel);
+  if (strippedReplyHeader !== content) {
+    let cleaned = strippedReplyHeader;
+    const withoutAliasLine = stripLeadingEquivalentAuthorLine(cleaned, repliedAuthorLabel);
+    if (withoutAliasLine !== cleaned) {
+      cleaned = withoutAliasLine;
+    }
+
+    const withoutQuotedText = stripLeadingQuotedTextBlock(cleaned, quotedText);
+    if (withoutQuotedText !== cleaned) {
+      cleaned = withoutQuotedText;
+    }
+
+    return cleaned || content;
+  }
+
+  const strippedAuthorThenQuote = stripAuthorThenQuotedTextBlock(content, quotedText, repliedAuthorLabel);
+  if (strippedAuthorThenQuote !== content) {
+    return strippedAuthorThenQuote || content;
   }
 
   if (content === quotedText) {

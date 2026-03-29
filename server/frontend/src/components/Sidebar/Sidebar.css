@@ -62,6 +62,17 @@
   max-width: 100%;
 }
 
+.si .preview.search-preview {
+  color: var(--text);
+}
+
+.search-hit {
+  background: rgba(255, 214, 10, .35);
+  color: inherit;
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
 .si .meta {
   display: flex;
   justify-content: space-between;

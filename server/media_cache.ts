@@ -27,6 +27,11 @@ function normalizeUrl(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function isLoopbackHost(hostname) {
+  const normalizedHost = normalizeUrl(hostname).toLowerCase();
+  return normalizedHost === '127.0.0.1' || normalizedHost === 'localhost' || normalizedHost === '::1';
+}
+
 function getCacheHash(url) {
   return crypto.createHash('sha256').update(url).digest('hex').slice(0, 24);
 }
@@ -69,7 +74,7 @@ function extractCachedMediaFileName(url) {
     const parsedUrl = new URL(normalizedUrl);
     const normalizedHost = parsedUrl.hostname.toLowerCase();
     const normalizedPath = parsedUrl.pathname || '';
-    if (!['localhost', '127.0.0.1'].includes(normalizedHost)) {
+    if (!isLoopbackHost(normalizedHost)) {
       return '';
     }
     if (!normalizedPath.startsWith(MEDIA_CACHE_URL_PREFIX)) {
@@ -83,6 +88,25 @@ function extractCachedMediaFileName(url) {
     return fileName;
   } catch (_) {
     return '';
+  }
+}
+
+function isForeignLoopbackMediaUrl(url, publicOrigin) {
+  const normalizedUrl = normalizeUrl(url);
+  if (!normalizedUrl) {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    if (!isLoopbackHost(parsedUrl.hostname) || !parsedUrl.pathname.startsWith(MEDIA_CACHE_URL_PREFIX)) {
+      return false;
+    }
+
+    const normalizedOrigin = normalizeUrl(publicOrigin).replace(/\/$/, '');
+    return !normalizedOrigin || !normalizedUrl.startsWith(`${normalizedOrigin}${MEDIA_CACHE_URL_PREFIX}`);
+  } catch (_) {
+    return false;
   }
 }
 
@@ -113,11 +137,167 @@ function shouldCacheRemoteImage(url, publicOrigin) {
   if (!/^https?:\/\//i.test(normalizedUrl)) {
     return false;
   }
+  if (isForeignLoopbackMediaUrl(normalizedUrl, publicOrigin)) {
+    return false;
+  }
   return !isCachedMediaUrl(normalizedUrl, publicOrigin);
 }
 
 function buildCachedMediaUrl(publicOrigin, fileName) {
   return `${normalizeUrl(publicOrigin).replace(/\/$/, '')}${MEDIA_CACHE_URL_PREFIX}${encodeURIComponent(fileName)}`;
+}
+
+function getCachedMediaFilePath(fileName) {
+  return path.join(MEDIA_CACHE_DIR, fileName);
+}
+
+function getCachedMediaPublicUrl(req) {
+  const host = req?.headers?.host || `localhost:${process.env.PORT || 3210}`;
+  const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim();
+  const protocol = forwardedProto || req?.protocol || 'http';
+  return `${protocol}://${host}`;
+}
+
+function findOriginalUrlByCachedFileName(fileName) {
+  if (!fileName) {
+    return '';
+  }
+
+  try {
+    const db = require('./db.ts');
+    if (typeof db.getDb !== 'function') {
+      return '';
+    }
+    return db.getDb().then((sqliteDb) => sqliteDb.all(
+      'SELECT content FROM messages WHERE type = ? AND content LIKE ? ORDER BY id DESC LIMIT 20',
+      'image',
+      `%/media-cache/${fileName}`
+    )).then((rows) => {
+      for (const row of rows) {
+        const content = normalizeUrl(row?.content);
+        if (!content) {
+          continue;
+        }
+        try {
+          const parsed = new URL(content);
+          if (decodeURIComponent(path.basename(parsed.pathname || '')) === fileName) {
+            return content;
+          }
+        } catch (_) {
+          continue;
+        }
+      }
+      return '';
+    }).catch((error) => {
+      console.warn('[media-cache] lookup original url failed:', fileName, error.message || error);
+      return '';
+    });
+  } catch (error) {
+    console.warn('[media-cache] lookup original url failed:', fileName, error.message || error);
+  }
+
+  return '';
+}
+
+async function ensureCachedMediaFile(fileName, { publicOrigin }) {
+  const normalizedFileName = normalizeUrl(fileName);
+  if (!normalizedFileName) {
+    return '';
+  }
+
+  const filePath = getCachedMediaFilePath(normalizedFileName);
+  if (filePath.startsWith(MEDIA_CACHE_DIR) && fs.existsSync(filePath)) {
+    return filePath;
+  }
+
+  const originalUrl = await findOriginalUrlByCachedFileName(normalizedFileName);
+  if (!originalUrl) {
+    return '';
+  }
+
+  const cachedUrl = await cacheRemoteImage(originalUrl, { publicOrigin });
+  const recoveredFileName = extractCachedMediaFileName(cachedUrl);
+  if (!recoveredFileName) {
+    return '';
+  }
+
+  const recoveredPath = getCachedMediaFilePath(recoveredFileName);
+  return recoveredPath.startsWith(MEDIA_CACHE_DIR) && fs.existsSync(recoveredPath)
+    ? recoveredPath
+    : '';
+}
+
+async function repairLocalizedMessage(message, { publicOrigin }) {
+  if (message?.type !== 'image') {
+    return message;
+  }
+
+  const normalizedContent = normalizeUrl(message.content);
+  if (isForeignLoopbackMediaUrl(normalizedContent, publicOrigin)) {
+    return {
+      ...message,
+      content: '',
+    };
+  }
+  const fileName = extractCachedMediaFileName(normalizedContent);
+  if (!fileName) {
+    return message;
+  }
+
+  const filePath = await ensureCachedMediaFile(fileName, { publicOrigin });
+  if (!filePath) {
+    return message;
+  }
+
+  return {
+    ...message,
+    content: buildCachedMediaUrl(publicOrigin, path.basename(filePath)),
+  };
+}
+
+async function repairLocalizedMessages(messages = [], { publicOrigin }) {
+  const list = Array.isArray(messages) ? messages : [];
+  return Promise.all(list.map((message) => repairLocalizedMessage(message, { publicOrigin })));
+}
+
+async function backfillCachedMediaFromMessages() {
+  ensureMediaCacheDir();
+
+  let sqliteDb;
+  try {
+    const db = require('./db.ts');
+    if (typeof db.getDb !== 'function') {
+      return { scanned: 0, existing: 0, missing: 0 };
+    }
+    sqliteDb = await db.getDb();
+  } catch (_) {
+    return { scanned: 0, existing: 0, missing: 0 };
+  }
+
+  const rows = await sqliteDb.all(
+    'SELECT DISTINCT content FROM messages WHERE type = ? AND content LIKE ? ORDER BY id DESC',
+    'image',
+    `%${MEDIA_CACHE_URL_PREFIX}%`
+  );
+
+  let scanned = 0;
+  let existing = 0;
+  let missing = 0;
+  for (const row of rows) {
+    const fileName = extractCachedMediaFileName(row?.content);
+    if (!fileName) {
+      continue;
+    }
+    scanned += 1;
+    const filePath = getCachedMediaFilePath(fileName);
+    if (filePath.startsWith(MEDIA_CACHE_DIR) && fs.existsSync(filePath)) {
+      existing += 1;
+    } else {
+      missing += 1;
+    }
+  }
+
+  return { scanned, existing, missing };
 }
 
 async function cacheRemoteImage(url, { publicOrigin }) {
@@ -202,7 +382,7 @@ async function localizeMessages(messages = [], { publicOrigin }) {
   }
 
   const mappings = await cacheRemoteImages(remoteUrls, { publicOrigin });
-  return list.map((message) => {
+  const localized = list.map((message) => {
     if (message?.type !== 'image') {
       return message;
     }
@@ -212,6 +392,8 @@ async function localizeMessages(messages = [], { publicOrigin }) {
       ? { ...message, content: nextContent }
       : message;
   });
+
+  return Promise.all(localized.map((message) => repairLocalizedMessage(message, { publicOrigin })));
 }
 
 async function localizeSessions(sessions = {}, { publicOrigin }) {
@@ -228,7 +410,7 @@ async function localizeSessions(sessions = {}, { publicOrigin }) {
   return Object.fromEntries(entries);
 }
 
-function serveCachedMediaRequest(req, res) {
+async function serveCachedMediaRequest(req, res) {
   const requestPath = decodeURIComponent((req.url || '').split('?')[0] || '');
   if (!requestPath.startsWith(MEDIA_CACHE_URL_PREFIX)) {
     return false;
@@ -242,26 +424,36 @@ function serveCachedMediaRequest(req, res) {
   }
 
   const filePath = path.join(MEDIA_CACHE_DIR, relativePath);
-  if (!filePath.startsWith(MEDIA_CACHE_DIR) || !fs.existsSync(filePath)) {
+  const resolvedPath = filePath.startsWith(MEDIA_CACHE_DIR)
+    ? (fs.existsSync(filePath)
+      ? filePath
+      : await ensureCachedMediaFile(relativePath, { publicOrigin: getCachedMediaPublicUrl(req) }))
+    : '';
+  if (!resolvedPath || !resolvedPath.startsWith(MEDIA_CACHE_DIR) || !fs.existsSync(resolvedPath)) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Not Found');
     return true;
   }
 
-  const extension = path.extname(filePath).toLowerCase();
+  const extension = path.extname(resolvedPath).toLowerCase();
   const contentType = CONTENT_TYPE_BY_EXTENSION[extension] || 'application/octet-stream';
   res.writeHead(200, {
     'Content-Type': contentType,
     'Cache-Control': 'public, max-age=31536000, immutable',
   });
-  fs.createReadStream(filePath).pipe(res);
+  fs.createReadStream(resolvedPath).pipe(res);
   return true;
 }
 
 module.exports = {
+  backfillCachedMediaFromMessages,
+  MEDIA_CACHE_DIR,
   MEDIA_CACHE_URL_PREFIX,
+  cacheRemoteImage,
   cacheRemoteImages,
   localizeMessages,
   localizeSessions,
+  repairLocalizedMessage,
+  repairLocalizedMessages,
   serveCachedMediaRequest,
 };

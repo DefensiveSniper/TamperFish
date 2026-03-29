@@ -1,8 +1,14 @@
 import { apiFetch } from './api';
 import type { Session, Message } from '../types/api';
 
-export function getSessions(): Promise<Session[]> {
-  return apiFetch<Session[]>('/api/sessions');
+export function getSessions(query = ''): Promise<Session[]> {
+  const params = new URLSearchParams();
+  if (query.trim()) {
+    params.set('q', query.trim());
+  }
+
+  const suffix = params.toString();
+  return apiFetch<Session[]>(suffix ? `/api/sessions?${suffix}` : '/api/sessions');
 }
 
 export function getSessionMessages(

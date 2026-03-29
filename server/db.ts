@@ -5,6 +5,7 @@ const { open } = require('sqlite');
 const sqlite3 = require('sqlite3');
 const crypto = require('crypto');
 const path = require('path');
+const mediaCache = require('./media_cache.ts');
 
 const DB_PATH = path.join(__dirname, 'data.db');
 const OUTGOING_CLAIM_STALE_SECONDS = 45;
@@ -32,6 +33,32 @@ function normalizeMessageContentForMatching(content, type = 'text') {
   return normalizedContent;
 }
 
+function getOutgoingComparableContent(outgoingMessage = {}) {
+  const messageType = outgoingMessage?.message_type || outgoingMessage?.type || 'text';
+  if (messageType === 'image') {
+    const mediaData = typeof outgoingMessage?.media_data === 'string' ? outgoingMessage.media_data.trim() : '';
+    if (mediaData) {
+      const dataUrlMatch = mediaData.match(/^data:image\/[^;]+;base64,([a-z0-9+/=]+)$/i);
+      if (dataUrlMatch?.[1]) {
+        const extensionMatch = mediaData.match(/^data:image\/([^;]+);base64,/i);
+        const extension = extensionMatch?.[1]?.toLowerCase() === 'jpeg'
+          ? '.jpg'
+          : extensionMatch?.[1]
+            ? `.${extensionMatch[1].toLowerCase()}`
+            : '.png';
+        const syntheticSourceUrl = `data-outgoing://${crypto.createHash('sha256').update(mediaData).digest('hex')}${extension}`;
+        const cacheHash = typeof mediaCache.getCacheHash === 'function'
+          ? mediaCache.getCacheHash(syntheticSourceUrl)
+          : crypto.createHash('sha256').update(syntheticSourceUrl).digest('hex').slice(0, 24);
+        return `image:${cacheHash}`;
+      }
+      return mediaData;
+    }
+  }
+
+  return typeof outgoingMessage?.content === 'string' ? outgoingMessage.content : '';
+}
+
 function areMessagesEquivalent(dbMessage, incomingMessage) {
   const dbType = dbMessage?.type || 'text';
   const incomingType = incomingMessage?.type || 'text';
@@ -45,6 +72,199 @@ function areMessagesEquivalent(dbMessage, incomingMessage) {
 
   return normalizeMessageContentForMatching(dbMessage?.content, dbType)
     === normalizeMessageContentForMatching(incomingMessage?.content, incomingType);
+}
+
+function getIncomingMessageTimestamp(message) {
+  const candidates = [
+    message?.timestamp,
+    message?.time,
+    message?.createdAt,
+    message?.created_at,
+    message?.sentAt,
+    message?.sent_at,
+  ];
+
+  for (const candidate of candidates) {
+    const numericValue = Number(candidate);
+    if (Number.isFinite(numericValue) && numericValue > 0) {
+      return numericValue;
+    }
+  }
+
+  return 0;
+}
+
+function countDirectionalOverlap(dbMessages, incomingMessages) {
+  const maxOverlap = Math.min(dbMessages.length, incomingMessages.length);
+  for (let overlap = maxOverlap; overlap >= 1; overlap--) {
+    let matched = true;
+    for (let index = 0; index < overlap; index++) {
+      const dbMessage = dbMessages[dbMessages.length - overlap + index];
+      const incomingMessage = incomingMessages[index];
+      if (!areMessagesEquivalent(dbMessage, incomingMessage)) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      return overlap;
+    }
+  }
+
+  return 0;
+}
+
+function normalizeIncomingMessagesOrder(dbMessages, incomingMessages) {
+  if (!Array.isArray(incomingMessages) || incomingMessages.length <= 1) {
+    return incomingMessages;
+  }
+
+  const firstTimestamp = getIncomingMessageTimestamp(incomingMessages[0]);
+  const lastTimestamp = getIncomingMessageTimestamp(incomingMessages[incomingMessages.length - 1]);
+  if (firstTimestamp && lastTimestamp && firstTimestamp > lastTimestamp) {
+    return incomingMessages.slice().reverse();
+  }
+
+  if (!Array.isArray(dbMessages) || dbMessages.length === 0) {
+    return incomingMessages;
+  }
+
+  const forwardOverlap = countDirectionalOverlap(dbMessages, incomingMessages);
+  const reversedMessages = incomingMessages.slice().reverse();
+  const reversedOverlap = countDirectionalOverlap(dbMessages, reversedMessages);
+
+  if (reversedOverlap > forwardOverlap) {
+    return reversedMessages;
+  }
+
+  return incomingMessages;
+}
+
+function findContainedSequenceStart(fullMessages, subsetMessages) {
+  if (!Array.isArray(fullMessages) || !Array.isArray(subsetMessages)) {
+    return -1;
+  }
+
+  if (!subsetMessages.length || fullMessages.length < subsetMessages.length) {
+    return -1;
+  }
+
+  for (let start = 0; start <= fullMessages.length - subsetMessages.length; start += 1) {
+    let matched = true;
+    for (let index = 0; index < subsetMessages.length; index += 1) {
+      if (!areMessagesEquivalent(fullMessages[start + index], subsetMessages[index])) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      return start;
+    }
+  }
+
+  return -1;
+}
+
+function countEquivalentMessages(leftMessages, rightMessages) {
+  if (!Array.isArray(leftMessages) || !Array.isArray(rightMessages)) {
+    return 0;
+  }
+
+  const usedRightIndexes = new Set();
+  let matchedCount = 0;
+
+  for (const leftMessage of leftMessages) {
+    const matchIndex = rightMessages.findIndex((rightMessage, index) => {
+      if (usedRightIndexes.has(index)) {
+        return false;
+      }
+      return areMessagesEquivalent(leftMessage, rightMessage);
+    });
+
+    if (matchIndex >= 0) {
+      usedRightIndexes.add(matchIndex);
+      matchedCount += 1;
+    }
+  }
+
+  return matchedCount;
+}
+
+function shouldReplaceSessionMessages(dbMessages, incomingMessages) {
+  if (!Array.isArray(dbMessages) || !Array.isArray(incomingMessages)) {
+    return false;
+  }
+
+  if (!dbMessages.length || incomingMessages.length <= dbMessages.length) {
+    return false;
+  }
+
+  const containedStart = findContainedSequenceStart(incomingMessages, dbMessages);
+  if (containedStart <= 0) {
+    return false;
+  }
+
+  const equivalentCount = countEquivalentMessages(dbMessages, incomingMessages);
+  return equivalentCount === dbMessages.length;
+}
+
+async function replaceSessionMessages(db, accountId, chatKey, incomingMessages) {
+  await db.run(
+    `DELETE FROM messages WHERE account_id = ? AND chat_key = ?`,
+    accountId,
+    chatKey
+  );
+
+  let currentSeq = 0;
+  let newMsgCount = 0;
+  const newMessages = [];
+
+  for (const message of incomingMessages) {
+    const {
+      content,
+      isMe,
+      type = 'text',
+      messageId = null,
+      replyMessageId = null,
+    } = message || {};
+
+    if (!content) {
+      continue;
+    }
+
+    const comparableContent = normalizeMessageContentForMatching(content, type);
+    const hashSeed = normalizeOptionalText(messageId)
+      || `v5:${chatKey}:${isMe ? 1 : 0}:${type}:${comparableContent}:${currentSeq}`;
+    const hash = crypto.createHash('md5').update(hashSeed).digest('hex');
+    const matchedOutgoing = await matchOutgoingMessage(db, accountId, chatKey, message);
+
+    await db.run(
+      `INSERT INTO messages(
+         account_id, chat_key, msg_hash, seq, content, is_me, type,
+         external_message_id, reply_to_message_id, outgoing_message_id
+       )
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      accountId,
+      chatKey,
+      hash,
+      currentSeq,
+      content,
+      isMe ? 1 : 0,
+      type,
+      normalizeOptionalText(messageId),
+      normalizeOptionalText(replyMessageId),
+      matchedOutgoing?.id || null
+    );
+
+    await backfillMessageTransportMetadata(db, accountId, chatKey, currentSeq, message);
+    await attachOutgoingMessageToStoredMessage(db, accountId, chatKey, currentSeq, matchedOutgoing?.id || null);
+
+    newMsgCount += 1;
+    newMessages.push({ seq: currentSeq, content, isMe, type });
+    currentSeq += 1;
+  }
+
+  return { newMsgCount, newMessages };
 }
 
 // ── DB init ─────────────────────────────────────────────────────────────────
@@ -161,6 +381,7 @@ const SCHEMA_V2_DDL = `
     type            TEXT NOT NULL DEFAULT 'text',
     external_message_id TEXT,
     reply_to_message_id TEXT,
+    outgoing_message_id INTEGER,
     ingested_at     INTEGER NOT NULL DEFAULT (unixepoch()),
     UNIQUE(account_id, chat_key, msg_hash),
     FOREIGN KEY (account_id, chat_key) REFERENCES sessions(account_id, chat_key)
@@ -314,6 +535,7 @@ async function runMigration(db) {
   // ── Safe column additions (idempotent, runs on every startup) ──
   const safeAlters = [
     `ALTER TABLE sessions ADD COLUMN last_read_at INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE messages ADD COLUMN outgoing_message_id INTEGER`,
   ];
   for (const sql of safeAlters) {
     try { await db.run(sql); } catch (_) { /* column already exists */ }
@@ -366,14 +588,7 @@ async function migrateV1ToV2(db) {
       );
     `);
 
-    // ── 2. Create default account + legacy client ──
-    await db.run(
-      `INSERT OR IGNORE INTO clients(client_id, account_id, client_name, capabilities_json, status)
-       VALUES(?, ?, 'Legacy Client', '["crawler","qianniu"]', 'active')`,
-      LEGACY_CLIENT_ID, DEFAULT_ACCOUNT_ID
-    );
-
-    // ── 3. Migrate app_settings → account_settings + client_runtime ──
+    // ── 2. Migrate app_settings → account_settings + client_runtime ──
     const accountSettingKeys = ['auto_reply_enabled'];
     const clientRuntimeKeys = [
       'crawler_desired_enabled', 'crawler_reported_enabled',
@@ -1022,6 +1237,20 @@ async function ensureRuntimeSettings(accountId, clientId, defaults = {}) {
   }
 }
 
+async function removeClient(clientId) {
+  const db = await getDb();
+  await db.exec('BEGIN');
+  try {
+    await db.run(`DELETE FROM client_commands WHERE client_id = ?`, clientId);
+    await db.run(`DELETE FROM client_runtime WHERE client_id = ?`, clientId);
+    await db.run(`DELETE FROM clients WHERE client_id = ?`, clientId);
+    await db.exec('COMMIT');
+  } catch (error) {
+    await db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 async function setInitialCrawlSessionCount(clientId, n) {
   await setClientRuntime(clientId, 'initial_crawl_session_count', String(Math.max(1, Math.min(100, n))));
 }
@@ -1143,7 +1372,10 @@ async function getQianniuRuntime(clientId) {
 
 // ── Session resolution ───────────────────────────────────────────────────────
 
-async function resolveCanonicalSessionKey(db, accountId, chatKey, customerName, productId, messages = [], sessionId = null) {
+async function resolveCanonicalSessionKey(db, accountId, chatKey, customerName, productId, buyerUserId, messages = [], sessionId = null) {
+  const normalizedChatKey = normalizeOptionalText(chatKey) || '';
+  const normalizedCustomerName = normalizeOptionalText(customerName) || '';
+
   if (sessionId) {
     const existingBySessionId = await db.get(
       `SELECT chat_key FROM sessions WHERE account_id = ? AND session_id = ?`,
@@ -1154,25 +1386,28 @@ async function resolveCanonicalSessionKey(db, accountId, chatKey, customerName, 
     }
   }
 
-  if (productId || !messages.length || chatKey.includes('_')) {
-    return chatKey;
-  }
+  const hasMissingCustomerPrefix = normalizedChatKey.startsWith('_') || !normalizedCustomerName;
 
-  const candidates = await db.all(
-    `SELECT chat_key
-     FROM sessions
-     WHERE account_id = ? AND customer_name = ?
-       AND product_id IS NOT NULL AND product_id != ''`,
-    accountId, customerName
-  );
-
-  for (const candidate of candidates) {
-    const dbMessages = await db.all(
-      'SELECT content, is_me FROM messages WHERE account_id = ? AND chat_key = ? ORDER BY seq ASC',
-      accountId, candidate.chat_key
+  // Only repair obviously broken anonymous keys like "_12345".
+  // Do not canonicalize by product_id alone, otherwise same-customer sessions
+  // across different listings can be merged into the wrong conversation.
+  if (hasMissingCustomerPrefix && productId && normalizedCustomerName) {
+    const existingByProduct = await db.get(
+      `SELECT chat_key
+       FROM sessions
+       WHERE account_id = ?
+         AND product_id = ?
+         AND customer_name = ?
+         AND customer_name IS NOT NULL
+         AND TRIM(customer_name) != ''
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+      accountId,
+      productId,
+      normalizedCustomerName
     );
-    if (areMessageSnapshotsEquivalent(dbMessages, messages)) {
-      return candidate.chat_key;
+    if (existingByProduct?.chat_key) {
+      return existingByProduct.chat_key;
     }
   }
 
@@ -1200,6 +1435,49 @@ async function cleanupDuplicateSessionKey(db, accountId, sourceChatKey, targetCh
   await db.run(`DELETE FROM messages WHERE account_id = ? AND chat_key = ?`, accountId, sourceChatKey);
   await db.run(`DELETE FROM outbox WHERE account_id = ? AND chat_key = ?`, accountId, sourceChatKey);
   await db.run(`DELETE FROM sessions WHERE account_id = ? AND chat_key = ?`, accountId, sourceChatKey);
+}
+
+async function cleanupBrokenAnonymousSessionKeys(db, accountId, canonicalChatKey, productId) {
+  const normalizedCanonicalChatKey = normalizeOptionalText(canonicalChatKey) || '';
+  const normalizedProductId = normalizeOptionalText(productId) || '';
+  if (!normalizedCanonicalChatKey || !normalizedProductId) {
+    return;
+  }
+
+  const brokenChatKey = `_${normalizedProductId}`;
+  if (brokenChatKey === normalizedCanonicalChatKey) {
+    return;
+  }
+
+  const brokenSession = await db.get(
+    `SELECT chat_key, customer_name, product_id, session_id
+     FROM sessions
+     WHERE account_id = ? AND chat_key = ?`,
+    accountId,
+    brokenChatKey
+  );
+
+  if (!brokenSession) {
+    return;
+  }
+
+  const targetSession = await db.get(
+    `SELECT customer_name, product_id, session_id
+     FROM sessions
+     WHERE account_id = ? AND chat_key = ?`,
+    accountId,
+    normalizedCanonicalChatKey
+  );
+
+  await cleanupDuplicateSessionKey(
+    db,
+    accountId,
+    brokenChatKey,
+    normalizedCanonicalChatKey,
+    targetSession?.customer_name || '',
+    targetSession?.product_id || normalizedProductId,
+    targetSession?.session_id || null
+  );
 }
 
 async function cleanupEmptySessionShell(db, accountId, chatKey) {
@@ -1255,15 +1533,185 @@ async function backfillMessageTransportMetadata(db, accountId, chatKey, seq, mes
   );
 }
 
+async function matchOutgoingMessage(db, accountId, chatKey, message = {}) {
+  if (!message?.isMe) {
+    return null;
+  }
+
+  const messageType = message.type || 'text';
+  const normalizedContent = normalizeMessageContentForMatching(message.content, messageType);
+  if (!normalizedContent) {
+    return null;
+  }
+
+  const messageCreatedAt = Number(
+    message.createdAt
+    || message.created_at
+    || message.sentAt
+    || message.sent_at
+    || message.ingestedAt
+    || message.ingested_at
+    || 0
+  ) || 0;
+
+  const candidates = await db.all(
+    `SELECT id, status, content, media_data, message_type, created_at, sent_at, claimed_at, last_attempt_at
+     FROM outgoing_messages
+     WHERE account_id = ?
+       AND chat_key = ?
+       AND status IN ('sending', 'sent')
+     ORDER BY id DESC
+     LIMIT 50`,
+    accountId,
+    chatKey
+  );
+
+  return candidates.find((candidate) => {
+    if ((candidate.message_type || 'text') !== messageType) {
+      return false;
+    }
+
+    if (normalizeMessageContentForMatching(getOutgoingComparableContent(candidate), candidate.message_type || 'text') !== normalizedContent) {
+      return false;
+    }
+
+    if (!messageCreatedAt) {
+      return true;
+    }
+
+    const candidateTimes = [candidate.sent_at, candidate.claimed_at, candidate.last_attempt_at, candidate.created_at]
+      .map((value) => Number(value || 0))
+      .filter(Boolean);
+
+    if (!candidateTimes.length) {
+      return true;
+    }
+
+    return candidateTimes.some((value) => Math.abs(value - messageCreatedAt) <= 30);
+  }) || null;
+}
+
+async function reconcileRecentOutgoingMessages(db, accountId, chatKey) {
+  const recentMessages = await db.all(
+    `SELECT seq, type, content, ingested_at
+     FROM messages
+     WHERE account_id = ?
+       AND chat_key = ?
+       AND is_me = 1
+       AND outgoing_message_id IS NULL
+     ORDER BY ingested_at DESC, seq DESC
+     LIMIT 30`,
+    accountId,
+    chatKey
+  );
+
+  if (!recentMessages.length) {
+    return;
+  }
+
+  const outgoingCandidates = await db.all(
+    `SELECT id, message_type, content, media_data, created_at, sent_at, claimed_at, last_attempt_at
+     FROM outgoing_messages
+     WHERE account_id = ?
+       AND chat_key = ?
+       AND status IN ('sending', 'sent')
+     ORDER BY id DESC
+     LIMIT 50`,
+    accountId,
+    chatKey
+  );
+
+  if (!outgoingCandidates.length) {
+    return;
+  }
+
+  const usedOutgoingIds = new Set(
+    (await db.all(
+      `SELECT outgoing_message_id
+       FROM messages
+       WHERE account_id = ?
+         AND chat_key = ?
+         AND outgoing_message_id IS NOT NULL`,
+      accountId,
+      chatKey
+    )).map((row) => row.outgoing_message_id).filter(Boolean)
+  );
+
+  for (const message of recentMessages) {
+    const normalizedContent = normalizeMessageContentForMatching(message.content, message.type || 'text');
+    if (!normalizedContent) {
+      continue;
+    }
+
+    const messageTime = Number(message.ingested_at || 0) || 0;
+    const matchedOutgoing = outgoingCandidates.find((candidate) => {
+      if (usedOutgoingIds.has(candidate.id)) {
+        return false;
+      }
+      if ((candidate.message_type || 'text') !== (message.type || 'text')) {
+        return false;
+      }
+      if (normalizeMessageContentForMatching(getOutgoingComparableContent(candidate), candidate.message_type || 'text') !== normalizedContent) {
+        return false;
+      }
+
+      const candidateTimes = [candidate.sent_at, candidate.claimed_at, candidate.last_attempt_at, candidate.created_at]
+        .map((value) => Number(value || 0))
+        .filter(Boolean);
+
+      if (!messageTime || !candidateTimes.length) {
+        return true;
+      }
+
+      return candidateTimes.some((value) => Math.abs(value - messageTime) <= 30);
+    });
+
+    if (!matchedOutgoing) {
+      continue;
+    }
+
+    await attachOutgoingMessageToStoredMessage(db, accountId, chatKey, message.seq, matchedOutgoing.id);
+    usedOutgoingIds.add(matchedOutgoing.id);
+  }
+}
+
+async function attachOutgoingMessageToStoredMessage(db, accountId, chatKey, seq, outgoingId) {
+  if (!outgoingId) {
+    return;
+  }
+
+  await db.run(
+    `UPDATE messages
+     SET outgoing_message_id = COALESCE(outgoing_message_id, ?)
+     WHERE account_id = ? AND chat_key = ? AND seq = ?`,
+    outgoingId,
+    accountId,
+    chatKey,
+    seq
+  );
+
+  await db.run(
+    `UPDATE outgoing_messages
+     SET status = 'sent',
+         sent_at = COALESCE(sent_at, unixepoch()),
+         claimed_at = NULL,
+         error = NULL
+     WHERE id = ?`,
+    outgoingId
+  );
+}
+
 // ── Ingest ───────────────────────────────────────────────────────────────────
 
 async function ingest(accountId, clientId, sessions) {
   const db = await getDb();
   const results = {};
+  let activeChatKey = '';
 
   await db.exec('BEGIN');
   try {
     for (const [chatKey, session] of Object.entries(sessions)) {
+      activeChatKey = chatKey;
       const {
         customerName,
         productId = null,
@@ -1295,7 +1743,7 @@ async function ingest(accountId, clientId, sessions) {
       }
 
       const canonicalChatKey = await resolveCanonicalSessionKey(
-        db, accountId, chatKey, effectiveCustomerName, productId, messages, normalizedSessionId
+        db, accountId, chatKey, effectiveCustomerName, productId, buyerUserId, messages, normalizedSessionId
       );
       const productJson = JSON.stringify(product);
 
@@ -1339,6 +1787,7 @@ async function ingest(accountId, clientId, sessions) {
       await cleanupDuplicateSessionKey(
         db, accountId, chatKey, canonicalChatKey, effectiveCustomerName, productId, normalizedSessionId
       );
+      await cleanupBrokenAnonymousSessionKeys(db, accountId, canonicalChatKey, productId);
 
       if (!existing) {
         await db.run(
@@ -1356,22 +1805,38 @@ async function ingest(accountId, clientId, sessions) {
       }
 
       const dbMsgs = await db.all(
-        'SELECT id, content, is_me, seq, type FROM messages WHERE account_id = ? AND chat_key = ? ORDER BY seq ASC',
+        'SELECT content, is_me, seq, type FROM messages WHERE account_id = ? AND chat_key = ? ORDER BY seq ASC',
         accountId, canonicalChatKey
       );
+
+      const normalizedMessages = normalizeIncomingMessagesOrder(dbMsgs, messages);
 
       let newMsgCount = 0;
       const newMessages = [];
       let currentSeq = dbMsgs.length > 0 ? dbMsgs[dbMsgs.length - 1].seq + 1 : 0;
 
-      if (messages && messages.length > 0) {
+      if (normalizedMessages && normalizedMessages.length > 0) {
+        if (shouldReplaceSessionMessages(dbMsgs, normalizedMessages)) {
+          const replaced = await replaceSessionMessages(db, accountId, canonicalChatKey, normalizedMessages);
+          newMsgCount += replaced.newMsgCount;
+          newMessages.push(...replaced.newMessages);
+          results[chatKey] = {
+            canonicalChatKey,
+            totalMessages: normalizedMessages.length,
+            newMsgCount,
+            newMessages,
+          };
+          await reconcileRecentOutgoingMessages(db, accountId, canonicalChatKey);
+          continue;
+        }
+
         let isSubstring = false;
         let substringStart = -1;
-        if (dbMsgs.length >= messages.length) {
-          for (let start = 0; start <= dbMsgs.length - messages.length; start++) {
+        if (dbMsgs.length >= normalizedMessages.length) {
+          for (let start = 0; start <= dbMsgs.length - normalizedMessages.length; start++) {
             let match = true;
-            for (let j = 0; j < messages.length; j++) {
-              if (!areMessagesEquivalent(dbMsgs[start + j], messages[j])) {
+            for (let j = 0; j < normalizedMessages.length; j++) {
+              if (!areMessagesEquivalent(dbMsgs[start + j], normalizedMessages[j])) {
                 match = false;
                 break;
               }
@@ -1386,13 +1851,13 @@ async function ingest(accountId, clientId, sessions) {
 
         if (!isSubstring) {
           let overlapLen = 0;
-          const maxOverlap = Math.min(dbMsgs.length, messages.length);
+          const maxOverlap = Math.min(dbMsgs.length, normalizedMessages.length);
 
           for (let i = maxOverlap; i >= 0; i--) {
             let match = true;
             for (let j = 0; j < i; j++) {
               const dbMsg = dbMsgs[dbMsgs.length - i + j];
-              const inMsg = messages[j];
+              const inMsg = normalizedMessages[j];
               if (!areMessagesEquivalent(dbMsg, inMsg)) {
                 match = false;
                 break;
@@ -1406,18 +1871,26 @@ async function ingest(accountId, clientId, sessions) {
 
           for (let i = 0; i < overlapLen; i++) {
             await backfillMessageTransportMetadata(
-              db, accountId, canonicalChatKey, dbMsgs[dbMsgs.length - overlapLen + i].seq, messages[i]
+              db, accountId, canonicalChatKey, dbMsgs[dbMsgs.length - overlapLen + i].seq, normalizedMessages[i]
+            );
+            const matchedOutgoing = await matchOutgoingMessage(db, accountId, canonicalChatKey, normalizedMessages[i]);
+            await attachOutgoingMessageToStoredMessage(
+              db,
+              accountId,
+              canonicalChatKey,
+              dbMsgs[dbMsgs.length - overlapLen + i].seq,
+              matchedOutgoing?.id || null
             );
           }
 
-          for (let i = overlapLen; i < messages.length; i++) {
+          for (let i = overlapLen; i < normalizedMessages.length; i++) {
             const {
               content,
               isMe,
               type = 'text',
               messageId = null,
               replyMessageId = null,
-            } = messages[i];
+            } = normalizedMessages[i];
             if (!content) continue;
 
             const comparableContent = normalizeMessageContentForMatching(content, type);
@@ -1426,14 +1899,23 @@ async function ingest(accountId, clientId, sessions) {
             const result = await db.run(
               `INSERT OR IGNORE INTO messages(
                  account_id, chat_key, msg_hash, seq, content, is_me, type,
-                 external_message_id, reply_to_message_id
+                 external_message_id, reply_to_message_id, outgoing_message_id
                )
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               accountId, canonicalChatKey, hash, currentSeq, content, isMe ? 1 : 0, type,
-              normalizeOptionalText(messageId), normalizeOptionalText(replyMessageId)
+              normalizeOptionalText(messageId), normalizeOptionalText(replyMessageId),
+              (await matchOutgoingMessage(db, accountId, canonicalChatKey, normalizedMessages[i]))?.id || null
             );
 
-            await backfillMessageTransportMetadata(db, accountId, canonicalChatKey, currentSeq, messages[i]);
+            await backfillMessageTransportMetadata(db, accountId, canonicalChatKey, currentSeq, normalizedMessages[i]);
+            const matchedOutgoing = await matchOutgoingMessage(db, accountId, canonicalChatKey, normalizedMessages[i]);
+            await attachOutgoingMessageToStoredMessage(
+              db,
+              accountId,
+              canonicalChatKey,
+              currentSeq,
+              matchedOutgoing?.id || null
+            );
 
             if (result.changes > 0) {
               newMsgCount++;
@@ -1442,9 +1924,17 @@ async function ingest(accountId, clientId, sessions) {
             }
           }
         } else if (substringStart >= 0) {
-          for (let i = 0; i < messages.length; i++) {
+          for (let i = 0; i < normalizedMessages.length; i++) {
             await backfillMessageTransportMetadata(
-              db, accountId, canonicalChatKey, dbMsgs[substringStart + i].seq, messages[i]
+              db, accountId, canonicalChatKey, dbMsgs[substringStart + i].seq, normalizedMessages[i]
+            );
+            const matchedOutgoing = await matchOutgoingMessage(db, accountId, canonicalChatKey, normalizedMessages[i]);
+            await attachOutgoingMessageToStoredMessage(
+              db,
+              accountId,
+              canonicalChatKey,
+              dbMsgs[substringStart + i].seq,
+              matchedOutgoing?.id || null
             );
           }
         }
@@ -1463,6 +1953,18 @@ async function ingest(accountId, clientId, sessions) {
         );
       }
 
+      if (!existing && dbMsgs.length === 0 && newMsgCount > 0) {
+        await db.run(
+          `UPDATE sessions
+             SET last_read_at = unixepoch()
+           WHERE account_id = ? AND chat_key = ? AND last_read_at = 0`,
+          accountId,
+          canonicalChatKey
+        );
+      }
+
+      await reconcileRecentOutgoingMessages(db, accountId, canonicalChatKey);
+
       results[chatKey] = {
         isNewSession: !existing,
         newMsgCount,
@@ -1473,7 +1975,7 @@ async function ingest(accountId, clientId, sessions) {
     await db.exec('COMMIT');
   } catch (err) {
     await db.exec('ROLLBACK');
-    throw err;
+    console.error('[ingest]', { activeChatKey, error: e, stack: e?.stack || null });
   }
 
   return results;
@@ -1481,24 +1983,64 @@ async function ingest(accountId, clientId, sessions) {
 
 // ── Queries ──────────────────────────────────────────────────────────────────
 
-async function listSessions(accountId) {
+async function listSessions(accountId, query = '') {
   const db = await getDb();
+  const normalizedQuery = String(query || '').trim();
+  const likeQuery = normalizedQuery ? `%${normalizedQuery}%` : '';
   return db.all(`
     SELECT
       s.chat_key, s.account_id, s.customer_name, s.product_id, s.product_json,
       s.session_id, s.session_info_json, s.buyer_user_id, s.last_seen_client_id,
-      s.created_at, s.updated_at,
-      COUNT(m.id) AS message_count,
-      (SELECT COUNT(*) FROM messages m2
-        WHERE m2.account_id = s.account_id AND m2.chat_key = s.chat_key
-          AND m2.is_me = 0
-          AND m2.ingested_at > s.last_read_at
+      COUNT(CASE
+        WHEN m.is_me = 0
+          AND m.ingested_at > s.last_read_at
+        THEN 1 END
       ) AS unread_count,
       (SELECT content FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_message,
       (SELECT is_me   FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1) AS last_is_me,
+      CASE
+        WHEN ? = '' THEN NULL
+        ELSE (
+          SELECT COALESCE(mx.content, '')
+          FROM messages mx
+          WHERE mx.account_id = s.account_id
+            AND mx.chat_key = s.chat_key
+            AND LOWER(COALESCE(mx.content, '')) LIKE LOWER(?)
+          ORDER BY mx.ingested_at DESC, mx.seq DESC, mx.rowid DESC
+          LIMIT 1
+        )
+      END AS search_match_preview,
+      CASE
+        WHEN ? = '' THEN NULL
+        ELSE (
+          SELECT mx.external_message_id
+          FROM messages mx
+          WHERE mx.account_id = s.account_id
+            AND mx.chat_key = s.chat_key
+            AND LOWER(COALESCE(mx.content, '')) LIKE LOWER(?)
+          ORDER BY mx.ingested_at DESC, mx.seq DESC, mx.rowid DESC
+          LIMIT 1
+        )
+      END AS search_match_external_message_id,
+      CASE
+        WHEN ? = '' THEN NULL
+        WHEN LOWER(COALESCE(s.customer_name, '')) LIKE LOWER(?) THEN 'customer_name'
+        WHEN LOWER(COALESCE(s.chat_key, '')) LIKE LOWER(?) THEN 'chat_key'
+        WHEN LOWER(COALESCE(s.product_id, '')) LIKE LOWER(?) THEN 'product_id'
+        WHEN EXISTS (
+          SELECT 1
+          FROM messages mx
+          WHERE mx.account_id = s.account_id
+            AND mx.chat_key = s.chat_key
+            AND LOWER(COALESCE(mx.content, '')) LIKE LOWER(?)
+        ) THEN 'message'
+        ELSE NULL
+      END AS search_match_field,
       (
         SELECT MAX(t) FROM (
           SELECT * FROM (SELECT ingested_at as t FROM messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY seq DESC LIMIT 1)
+          UNION ALL
+          SELECT * FROM (SELECT updated_at as t FROM sessions WHERE account_id = s.account_id AND chat_key = s.chat_key LIMIT 1)
           UNION ALL
           SELECT * FROM (SELECT created_at as t FROM outgoing_messages WHERE account_id = s.account_id AND chat_key = s.chat_key ORDER BY id DESC LIMIT 1)
         )
@@ -1506,9 +2048,37 @@ async function listSessions(accountId) {
     FROM sessions s
     LEFT JOIN messages m ON m.account_id = s.account_id AND m.chat_key = s.chat_key
     WHERE s.account_id = ?
+      AND (
+        ? = ''
+        OR LOWER(COALESCE(s.customer_name, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(s.chat_key, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(s.product_id, '')) LIKE LOWER(?)
+        OR EXISTS (
+          SELECT 1
+          FROM messages mx
+          WHERE mx.account_id = s.account_id
+            AND mx.chat_key = s.chat_key
+            AND LOWER(COALESCE(mx.content, '')) LIKE LOWER(?)
+        )
+      )
     GROUP BY s.account_id, s.chat_key
     ORDER BY COALESCE(last_time, s.updated_at) DESC
-  `, accountId);
+  `,
+  normalizedQuery,
+  likeQuery,
+  normalizedQuery,
+  likeQuery,
+  normalizedQuery,
+  likeQuery,
+  likeQuery,
+  likeQuery,
+  likeQuery,
+  accountId,
+  normalizedQuery,
+  likeQuery,
+  likeQuery,
+  likeQuery,
+  likeQuery);
 }
 
 async function markSessionRead(accountId, chatKey) {
@@ -1536,7 +2106,7 @@ async function getMessages(accountId, chatKey) {
   const db = await getDb();
   return db.all(
     `SELECT
-       id, account_id, chat_key, msg_hash, seq, content, is_me, type,
+       account_id, chat_key, msg_hash, seq, content, is_me, type,
        ingested_at, external_message_id, reply_to_message_id
      FROM messages
      WHERE account_id = ? AND chat_key = ?
@@ -1728,7 +2298,7 @@ async function listOrdersByChatKey(accountId, chatKey, limit = 20) {
 
 const OUTGOING_LIST_COLUMNS = [
   'id', 'account_id', 'chat_key', 'customer_name', 'product_id', 'session_id',
-  'content', 'message_type', 'media_name',
+  'content', 'message_type', 'media_data', 'media_name',
   'reply_to_external_message_id', 'reply_to_preview', 'reply_to_type',
   'target_client_id', 'claimed_by_client_id',
   'status', 'created_at', 'sent_at', 'claimed_at', 'error', 'retries', 'source',
@@ -1818,6 +2388,29 @@ async function listOutgoingMessages(accountId, chatKey, status) {
      WHERE account_id = ?
      ORDER BY id DESC LIMIT 100`,
     accountId
+  );
+}
+
+async function getOutgoingMessageById(id, accountId) {
+  const db = await getDb();
+  return db.get(
+    `SELECT ${OUTGOING_LIST_COLUMNS} FROM outgoing_messages WHERE id = ? AND account_id = ?`,
+    id, accountId
+  );
+}
+
+async function retryOutgoingMessage(id, accountId) {
+  const db = await getDb();
+  await db.run(
+    `UPDATE outgoing_messages
+     SET status = 'pending',
+         error = NULL,
+         claimed_by_client_id = NULL,
+         claimed_at = NULL,
+         last_attempt_at = NULL,
+         sent_at = NULL
+     WHERE id = ? AND account_id = ? AND status = 'failed'`,
+    id, accountId
   );
 }
 
@@ -1949,6 +2542,7 @@ async function hasPendingOutgoing(accountId, chatKey) {
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
+  getDb,
   // Client management
   registerClient,
   getClient,
@@ -1969,6 +2563,7 @@ module.exports = {
   updateCrawlerHeartbeat,
   getRuntimeSettings,
   ensureRuntimeSettings,
+  removeClient,
   setInitialCrawlSessionCount,
 
   // Client commands
@@ -1997,6 +2592,8 @@ module.exports = {
   // Outgoing messages
   addOutgoingMessage,
   listOutgoingMessages,
+  getOutgoingMessageById,
+  retryOutgoingMessage,
   updateOutgoingStatus,
   claimOutgoingMessage,
 

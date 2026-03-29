@@ -386,22 +386,6 @@
     }
 
     /**
-     * 判断两组消息是否为同一条会话快照。
-     * @param {{content: string, isMe: boolean, type?: string}[]} left
-     * @param {{content: string, isMe: boolean, type?: string}[]} right
-     * @returns {boolean} 是否逐条完全一致。
-     */
-    function areMessagesEquivalent(left = [], right = []) {
-        if (left.length !== right.length) return false;
-        for (let i = 0; i < left.length; i++) {
-            if ((left[i]?.content || '') !== (right[i]?.content || '')) return false;
-            if (!!left[i]?.isMe !== !!right[i]?.isMe) return false;
-            if ((left[i]?.type || 'text') !== (right[i]?.type || 'text')) return false;
-        }
-        return true;
-    }
-
-    /**
      * 合并两份商品信息，优先保留更完整的字段。
      * @param {Record<string, any>} preferred - 当前新提取到的商品信息。
      * @param {Record<string, any>} fallback - 历史缓存中的商品信息。
@@ -415,96 +399,6 @@
             id: preferred.id || fallback.id || null,
             userId: preferred.userId || fallback.userId || null
         };
-    }
-
-    /**
-     * 根据消息快照查找同买家下的完整会话键，用于把“无 ID 副本”并回真实会话。
-     * @param {string} customerName - 当前买家名。
-     * @param {{content: string, isMe: boolean}[]} messages - 当前右侧提取到的消息快照。
-     * @returns {string|null} 匹配到的完整会话键；未命中则返回 null。
-     */
-    function findCanonicalChatKey(customerName, messages) {
-        const matches = Object.entries(state.chats).filter(([key, chat]) => {
-            if (!key.includes('_')) return false;
-            const chatCustomerName = chat?.customerName || key.split('_')[0];
-            if (chatCustomerName !== customerName) return false;
-            if (!chat?.productId) return false;
-            return areMessagesEquivalent(chat.messages || [], messages || []);
-        });
-        return matches.length === 1 ? matches[0][0] : null;
-    }
-
-    /**
-     * 将旧的无 ID 副本会话合并到目标会话，并删除副本键。
-     * @param {string} sourceKey - 待删除的副本键。
-     * @param {string} targetKey - 最终保留的真实会话键。
-     * @param {{ customerName: string, productId: string|null, buyerUserId?: string|null, product: Record<string, any>, messages: {content: string, isMe: boolean}[] }} incomingChat - 本轮新提取的会话快照。
-     * @returns {boolean} 是否发生了合并。
-     */
-    function mergeDuplicateChatState(sourceKey, targetKey, incomingChat) {
-        if (!sourceKey || !targetKey || sourceKey === targetKey) return false;
-        const sourceChat = state.chats[sourceKey];
-        if (!sourceChat) return false;
-
-        const targetChat = state.chats[targetKey] || {
-            customerName: incomingChat.customerName,
-            productId: incomingChat.productId || null,
-            messages: [],
-            product: {},
-            buyerUserId: incomingChat.buyerUserId || null,
-            sessionId: incomingChat.sessionId || null,
-            sessionInfo: incomingChat.sessionInfo || null
-        };
-
-        const sourceMessages = sourceChat.messages || [];
-        const targetMessages = targetChat.messages || [];
-        const mergedMessages = incomingChat.messages.length >= targetMessages.length
-            ? incomingChat.messages
-            : (targetMessages.length >= sourceMessages.length ? targetMessages : sourceMessages);
-
-        state.chats[targetKey] = {
-            customerName: incomingChat.customerName || targetChat.customerName || sourceChat.customerName || targetKey.split('_')[0],
-            productId: incomingChat.productId || targetChat.productId || sourceChat.productId || null,
-            messages: mergedMessages,
-            product: mergeProductInfo(incomingChat.product, mergeProductInfo(targetChat.product, sourceChat.product)),
-            buyerUserId: incomingChat.buyerUserId || targetChat.buyerUserId || sourceChat.buyerUserId || null,
-            sessionId: incomingChat.sessionId || targetChat.sessionId || sourceChat.sessionId || null,
-            sessionInfo: incomingChat.sessionInfo || targetChat.sessionInfo || sourceChat.sessionInfo || null
-        };
-
-        delete state.chats[sourceKey];
-        delete state.collapsed[sourceKey];
-        delete state.scrollPositions[sourceKey];
-
-        if (state.currentKey === sourceKey) {
-            state.currentKey = targetKey;
-        }
-
-        return true;
-    }
-
-    /**
-     * 清理本地缓存里已经存在的无 ID 重复会话，避免它们继续被 sync.js 同步到后端。
-     * @returns {number} 被合并删除的副本数量。
-     */
-    function cleanupAnonymousDuplicateChats() {
-        let cleaned = 0;
-        for (const [chatKey, chat] of Object.entries({ ...state.chats })) {
-            if (!chat || chatKey.includes('_') || chat.productId) continue;
-            const customerName = chat.customerName || chatKey;
-            const canonicalKey = findCanonicalChatKey(customerName, chat.messages || []);
-            if (!canonicalKey) continue;
-            if (mergeDuplicateChatState(chatKey, canonicalKey, {
-                customerName,
-                productId: state.chats[canonicalKey]?.productId || null,
-                buyerUserId: state.chats[canonicalKey]?.buyerUserId || chat.buyerUserId || null,
-                product: mergeProductInfo(state.chats[canonicalKey]?.product || {}, chat.product || {}),
-                messages: chat.messages || []
-            })) {
-                cleaned++;
-            }
-        }
-        return cleaned;
     }
 
     /**
@@ -1555,10 +1449,7 @@
                 }
             });
 
-            const canonicalChatKey = findCanonicalChatKey(customerName, messages);
-            const chatKey = product.id
-                ? buildChatKey(customerName, product.id)
-                : (canonicalChatKey || buildChatKey(customerName, null));
+            const chatKey = buildChatKey(customerName, product.id || null);
             const buyerUserId = activeEntry?.sessionInfo?.userInfo?.userId || product.userId || null;
             state.currentKey = chatKey;
             state.currentSessionId = activeEntry?.sessionId || null;
@@ -1594,14 +1485,6 @@
         } catch (e) { console.error('[XM]', e); }
     }
 
-    /**
-     * 判断当前是否存在可供轻量同步的活跃会话，避免在空白页上空转。
-     * @returns {boolean} 当前是否检测到活跃会话。
-     */
-    function hasActiveConversation() {
-        if (getCurrentActiveSessionId()) {
-            return true;
-        }
 
         const main = document.querySelector('div[role="main"]') || document.querySelector('main');
         if (!main) {

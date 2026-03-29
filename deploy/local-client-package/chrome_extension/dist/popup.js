@@ -1,0 +1,1 @@
+(function(){"use strict";const t=document.getElementById("hint");async function o(){const n=await chrome.tabs.query({url:"https://www.goofish.com/im*"});return n.length>0?n[0]??null:null}(async()=>await o()?t&&(t.textContent="内嵌浮窗已在 goofish.com 页面中运行。"):t&&(t.textContent="未检测到 goofish.com/im 标签页，请先打开闲鱼 IM 页面。"))()})();

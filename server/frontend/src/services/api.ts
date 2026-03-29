@@ -1,5 +1,10 @@
 let _accountId = 'default';
-let _clientId = 'legacy-client-1';
+let _clientId = '';
+
+function encodeHeaderValue(value: string): string {
+  const normalized = String(value || '');
+  return /[^\x00-\xff]/.test(normalized) ? encodeURIComponent(normalized) : normalized;
+}
 
 export function setActiveAccountId(accountId: string) {
   _accountId = accountId;
@@ -10,7 +15,7 @@ export function getActiveAccountId(): string {
 }
 
 export function setActiveClientId(clientId: string) {
-  _clientId = clientId;
+  _clientId = clientId || '';
 }
 
 export function getActiveClientId(): string {
@@ -20,10 +25,13 @@ export function getActiveClientId(): string {
 export async function apiFetch<T>(url: string, opts?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-Account-Id': _accountId,
-    'X-Client-Id': _clientId,
+    'X-Account-Id': encodeHeaderValue(_accountId),
     ...opts?.headers as Record<string, string>,
   };
+
+  if (_clientId) {
+    headers['X-Client-Id'] = encodeHeaderValue(_clientId);
+  }
 
   const response = await fetch(url, {
     ...opts,

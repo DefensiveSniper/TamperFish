@@ -10,7 +10,7 @@ import { getOrdersRuntime } from '../services/ordersApi';
 import { getAllClients } from '../services/clientsApi';
 import type { ChatSnapshot } from '../types/api';
 
-export function usePolling(intervalMs = 3000) {
+export function usePolling(intervalMs = 3000, sessionSearchQuery = '') {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const stateRef = useRef(state);
@@ -31,6 +31,7 @@ export function usePolling(intervalMs = 3000) {
     async function poll() {
       if (!running) return;
       const current = stateRef.current;
+      if (running) dispatch({ type: 'SET_BOOTSTRAP_ERROR', error: null });
 
       try {
         // 0. Fetch client list
@@ -46,7 +47,7 @@ export function usePolling(intervalMs = 3000) {
         if (running) dispatch({ type: 'SET_SETTINGS', settings });
 
         // 2. Sessions (account scoped via headers)
-        const sessions = await getSessions();
+        const sessions = await getSessions(sessionSearchQuery);
         if (running) dispatch({ type: 'SET_SESSIONS', sessions });
 
         // 3. Active chat refresh
@@ -61,6 +62,7 @@ export function usePolling(intervalMs = 3000) {
             if (running) {
               const snapshot: ChatSnapshot = { session, messages, outgoing, linkedOrders };
               dispatch({ type: 'SET_CHAT_CACHE', chatKey, snapshot });
+              dispatch({ type: 'RECONCILE_LOCAL_OUTGOING', chatKey, outgoing, messages });
             }
           } catch {
             // Active chat refresh failure is non-critical
@@ -88,8 +90,13 @@ export function usePolling(intervalMs = 3000) {
             // Orders refresh failure is non-critical
           }
         }
-      } catch {
-        // Top-level poll failure — just skip this cycle
+      } catch (error) {
+        if (running) {
+          dispatch({
+            type: 'SET_BOOTSTRAP_ERROR',
+            error: error instanceof Error ? error.message : '初始化失败',
+          });
+        }
       }
     }
 
@@ -101,5 +108,5 @@ export function usePolling(intervalMs = 3000) {
       running = false;
       clearInterval(timer);
     };
-  }, [intervalMs, dispatch]);
+  }, [intervalMs, dispatch, sessionSearchQuery]);
 }

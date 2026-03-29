@@ -1,15 +1,32 @@
-import type { Message } from '../../types/api';
+import type { Message, OutgoingMessage } from '../../types/api';
 import { formatReplyText, stripQuotedReplyPrefix } from '../../utils/replyPreview';
+import { isBrokenLoopbackChatImageUrl, resolveChatImageUrl } from '../../utils/mediaUrl';
 
 interface MessageBubbleProps {
-  message: Message;
+  message: Message | null;
+  outgoing?: OutgoingMessage | null;
   customerName: string;
   animateDelay?: number;
   onReply: (message: Message) => void;
+  onPreviewImage?: (imageUrl: string) => void;
+  onJumpToMessage?: (externalMessageId: string) => void;
+  isHighlighted?: boolean;
   repliedMessage: Message | null;
+  onRetryOutgoing?: (item: OutgoingMessage) => void;
 }
 
-function renderReplyPreview(message: Message | null, customerName: string) {
+const outgoingStatusLabelMap: Record<OutgoingMessage['status'], string> = {
+  pending: '发送中',
+  sending: '发送中',
+  sent: '已发送',
+  failed: '重新发送',
+};
+
+function renderReplyPreview(
+  message: Message | null,
+  customerName: string,
+  onJumpToMessage?: (externalMessageId: string) => void,
+) {
   if (!message) {
     return (
       <>
@@ -20,75 +37,144 @@ function renderReplyPreview(message: Message | null, customerName: string) {
   }
 
   const authorLabel = message.is_me ? '我' : customerName;
+  const canJump = Boolean(message.external_message_id && onJumpToMessage);
+  const handleJump = () => {
+    if (message.external_message_id && onJumpToMessage) {
+      onJumpToMessage(message.external_message_id);
+    }
+  };
 
   if (message.type === 'image') {
+    const resolvedReplyImage = resolveChatImageUrl(message.content);
     return (
-      <>
+      <button
+        type="button"
+        className={`bubble-reply-preview${canJump ? ' clickable' : ''}`}
+        onClick={handleJump}
+        disabled={!canJump}
+      >
         <div className="bubble-reply-meta">引用 {authorLabel} 的图片</div>
-        <div className="bubble-reply-body bubble-reply-body-image">
+        <div className="bubble-reply-body bubble-reply-body-image unified">
           <div className="bubble-reply-image-wrap">
-            <img className="bubble-reply-image" src={message.content} alt="引用图片" />
+            <img className="bubble-reply-image" src={resolvedReplyImage} alt="引用图片" />
             <span className="bubble-reply-image-label">图片引用</span>
           </div>
         </div>
-      </>
+      </button>
     );
   }
 
   return (
-    <>
+    <button
+      type="button"
+      className={`bubble-reply-preview${canJump ? ' clickable' : ''}`}
+      onClick={handleJump}
+      disabled={!canJump}
+    >
       <div className="bubble-reply-meta">
         引用 <span className="bubble-reply-author">{authorLabel}</span> 的消息
       </div>
-      <div className="bubble-reply-body">{formatReplyText(message)}</div>
-    </>
+      <div className="bubble-reply-body unified">{formatReplyText(message)}</div>
+    </button>
   );
 }
 
 export default function MessageBubble({
   message,
+  outgoing = null,
   customerName,
   animateDelay,
   onReply,
+  onPreviewImage,
+  onJumpToMessage,
+  isHighlighted = false,
   repliedMessage,
+  onRetryOutgoing,
 }: MessageBubbleProps) {
-  const side = message.is_me ? 'me' : 'them';
-  const label = message.is_me ? '我' : customerName;
+  const isOutgoingOnly = Boolean(outgoing && !message);
+  const side = isOutgoingOnly || message?.is_me ? 'me' : 'them';
   const repliedAuthorLabel = repliedMessage
     ? (repliedMessage.is_me ? '我' : customerName)
     : null;
-  const displayText = stripQuotedReplyPrefix(message, repliedMessage, repliedAuthorLabel);
+  const displayText = message
+    ? stripQuotedReplyPrefix(message, repliedMessage, repliedAuthorLabel)
+    : '';
   const style = animateDelay != null
     ? { animationDelay: `${animateDelay}ms` }
     : { animation: 'none' };
+  const bubbleText = message
+    ? (displayText || message.content)
+    : (outgoing?.message_type === 'image' ? null : outgoing?.content || '');
+  const bubbleImage = message?.type === 'image'
+    ? message.content
+    : outgoing?.message_type === 'image'
+      ? (outgoing.media_data || outgoing.content)
+      : null;
+  const resolvedBubbleImage = bubbleImage ? resolveChatImageUrl(bubbleImage) : null;
+  const showBrokenImagePlaceholder = Boolean(
+    bubbleImage
+    && isBrokenLoopbackChatImageUrl(bubbleImage)
+    && resolvedBubbleImage === bubbleImage,
+  );
+  const effectiveStatus = outgoing?.status || message?.outgoing_status || null;
+  const statusLabel = effectiveStatus ? outgoingStatusLabelMap[effectiveStatus] : null;
+  const canRetry = outgoing?.status === 'failed' && Boolean(onRetryOutgoing);
+  const canReply = Boolean(message?.external_message_id);
+  const resolvedLabel = side === 'me' ? '我' : customerName;
+  const shouldHideAuthorLabel = Boolean(message?.is_me && message?.reply_to_message_id);
 
   return (
-    <div className={`mr ${side}`} style={style}>
-      <div className="ml">{label}</div>
+    <div
+      className={`mr ${side}${isHighlighted ? ' highlighted' : ''}`}
+      style={style}
+      data-message-id={message?.external_message_id || ''}
+    >
+      {!shouldHideAuthorLabel ? <div className="ml">{resolvedLabel}</div> : null}
       <div className="bub">
-        {message.reply_to_message_id ? (
-          <div className="bubble-reply-preview">{renderReplyPreview(repliedMessage, customerName)}</div>
+        {message?.reply_to_message_id ? (
+          renderReplyPreview(repliedMessage, customerName, onJumpToMessage)
         ) : null}
-        {message.type === 'image' ? (
+        {resolvedBubbleImage && !showBrokenImagePlaceholder ? (
           <img
             className="chat-img"
-            src={message.content}
+            src={resolvedBubbleImage}
             alt="图片"
-            onClick={() => window.open(message.content, '_blank')}
+            onClick={() => onPreviewImage?.(resolvedBubbleImage)}
           />
+        ) : showBrokenImagePlaceholder ? (
+          <div className="chat-img-broken-placeholder">
+            <div className="chat-img-broken-icon">图片</div>
+            <div className="chat-img-broken-text">该图片尚未同步到服务器</div>
+          </div>
         ) : (
-          displayText || message.content
+          bubbleText
         )}
+        {statusLabel ? (
+          <div className="bubble-status-row">
+            {canRetry ? (
+              <button
+                type="button"
+                className="bubble-status-action failed"
+                onClick={() => onRetryOutgoing?.(outgoing as OutgoingMessage)}
+              >
+                {statusLabel}
+              </button>
+            ) : (
+              <span className={`bubble-status-text ${effectiveStatus || ''}`}>{statusLabel}</span>
+            )}
+          </div>
+        ) : null}
       </div>
-      <button
-        type="button"
-        className="bubble-reply-btn"
-        onClick={() => onReply(message)}
-        disabled={!message.external_message_id}
-        title={message.external_message_id ? '引用这条消息' : '当前消息还没有原生 messageId，暂时不能引用'}
-      >
-        引用
-      </button>
+      {canReply ? (
+        <button
+          type="button"
+          className="bubble-reply-btn"
+          onClick={() => onReply(message as Message)}
+          title="引用这条消息"
+        >
+          ↩
+        </button>
+      ) : null}
     </div>
   );
 }
