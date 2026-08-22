@@ -395,7 +395,12 @@ export function buildVisibleConversationEntries(): ConversationEntry[] {
         const sessionInfo = extractSessionInfoFromConversationItem(itemEl);
         if (!sessionInfo?.sessionId) continue;
 
-        const title = (itemEl.innerText || '').split('\n')[0].trim();
+        // 跳过纯数字行（闲鱼侧边栏未读数 badge 会出现在 innerText 第一行）
+        const titleLine = (itemEl.innerText || '')
+            .split('\n')
+            .map(l => l.trim())
+            .find(l => l.length > 0 && !/^\d+$/.test(l)) || '';
+        const title = titleLine;
         const productId = sessionInfo.itemInfo?.itemId ? String(sessionInfo.itemInfo.itemId) : '';
         const entry: ConversationEntry = {
             itemEl,

@@ -72,10 +72,13 @@ export function doesConversationMatchTask(
     // 此时直接用 chat_key 第一段匹配，避免找不到目标会话。
     const chatKeyPrefix = (task.chat_key || '').split('_')[0];
 
-    if (taskSessionId && entry.sessionId === String(taskSessionId)) {
-        return true;
+    // session_id 是会话级唯一标识，优先精确匹配。
+    // 有 session_id 时不走 title 模糊匹配，避免同名买家/售后交易关闭场景下误投。
+    if (taskSessionId) {
+        return entry.sessionId === String(taskSessionId);
     }
 
+    // 无 session_id（极少数历史数据）才退化为 title 模糊匹配。
     const titleMatches =
         (!!taskCustomerName && entry.title === taskCustomerName)
         || (!!chatKeyPrefix && chatKeyPrefix !== taskCustomerName && entry.title === chatKeyPrefix);
@@ -136,14 +139,55 @@ export async function activateConversationEntry(
 
 /**
  * 在当前可见会话列表中直接命中目标任务。
+ *
+ * 匹配优先级：
+ *   1. session_id 精确匹配（最高置信度，适用于售后/交易关闭等 product_id 缺失场景）
+ *   2. title + product_id 联合匹配（session_id 不可用时的回退）
+ *   3. title 单独匹配（仅当结果唯一且候选条目的 sessionId 与 taskSessionId 不冲突时才采用）
+ *
+ * 当存在多个同名候选且无法通过 session_id / product_id 消歧时，返回 null，
+ * 宁可让发送失败也不发到错误会话。
+ *
  * @param task - 待发任务。
- * @returns 命中的可见会话项；未命中则返回 null。
+ * @returns 命中的可见会话项；未命中或有歧义则返回 null。
  */
 export function findVisibleConversationForTask(
     task: OutgoingMessage
 ): ConversationEntry | null {
     const visibleEntries = buildVisibleConversationEntries();
-    return visibleEntries.find(entry => doesConversationMatchTask(entry, task)) || null;
+    const cachedChat = task.chat_key ? state.chats[task.chat_key] : null;
+    const taskSessionId = task.session_id || cachedChat?.sessionId || '';
+
+    // 1. session_id 精确匹配——最可靠，交易关闭后 sessionId 仍存在于 fiber
+    if (taskSessionId) {
+        const exact = visibleEntries.find(e => e.sessionId === String(taskSessionId));
+        if (exact) return exact;
+    }
+
+    // 2. title / product_id 模糊匹配（session_id 未命中时）
+    const candidates = visibleEntries.filter(e => doesConversationMatchTask(e, task));
+
+    if (candidates.length === 0) return null;
+
+    if (candidates.length === 1) {
+        const sole = candidates[0];
+        // 若 task 有明确 session_id，但候选条目持有不同的 sessionId，
+        // 说明这是另一个会话命中了 title——拒绝，避免发错人。
+        if (taskSessionId && sole.sessionId && sole.sessionId !== String(taskSessionId)) {
+            return null;
+        }
+        return sole;
+    }
+
+    // 3. 多个候选：尝试用 product_id 消歧
+    const taskProductId = String(task.product_id || cachedChat?.productId || '').trim();
+    if (taskProductId) {
+        const byProduct = candidates.find(e => e.productId === taskProductId);
+        if (byProduct) return byProduct;
+    }
+
+    // 真正歧义：同名买家多个会话，无法确定目标，拒绝猜测
+    return null;
 }
 
 /**
